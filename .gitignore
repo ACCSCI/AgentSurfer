@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+.output/
+.wxt/
+dist/
+build/
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+bun-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests / E2E
+coverage/
+playwright-report/
+test-results/
+.e2e/
+
+# Editor
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+
+# Project-local notes (not for git)
+.agentdock/
+.agents/
+skills-lock.json

@@ -1,0 +1,22 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": [
+    "./entrypoints/**/*",
+    "./components/**/*",
+    "./lib/**/*",
+    "./stores/**/*",
+    "./types/**/*",
+    "./scripts/**/*",
+    "./.wxt/wxt.d.ts",
+    "./.wxt/types/**/*",
+    "./wxt.config.ts"
+  ],
+  "exclude": ["node_modules", ".output", "dist", ".e2e", "playwright-report", "test-results"]
+}

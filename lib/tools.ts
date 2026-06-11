@@ -1,0 +1,157 @@
+// AI SDK tools — bridge the LLM to the active browser tab.
+// All execute() functions run in the service-worker context and use
+// chrome.scripting.executeScript to interact with the page (no pre-injected
+// content script needed for DOM operations).
+
+import { tool } from 'ai';
+import { z } from 'zod';
+
+// ---------- Helpers ----------
+
+async function getActiveTab(): Promise<chrome.tabs.Tab> {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.id) throw new Error('No active tab');
+  return tab;
+}
+
+async function runOnActiveTab<T>(func: () => T | Promise<T>): Promise<T> {
+  const tab = await getActiveTab();
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id as number },
+    // The function is auto-serialized to the MAIN world of the page.
+    func,
+  });
+  if (!result) throw new Error('executeScript returned no result');
+  return result.result as T;
+}
+
+// ---------- Tools ----------
+
+export const domQuery = tool({
+  description:
+    'Find DOM elements matching a CSS selector on the active tab. Returns up to `limit` elements with their tag, id, class, visible text (first 200 chars), and key attributes. Use this BEFORE clicking or typing to confirm what is on the page.',
+  parameters: z.object({
+    selector: z
+      .string()
+      .describe('CSS selector, e.g. "button.submit", "input[type=email]", "h1", "[data-testid=search]"'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .default(10)
+      .describe('Maximum number of elements to return (1-50, default 10)'),
+  }),
+  execute: async ({ selector, limit }) =>
+    runOnActiveTab(() => {
+      const els = Array.from(document.querySelectorAll(selector)).slice(0, limit);
+      return els.map((el, i) => {
+        const text = (el.textContent ?? '').trim().slice(0, 200);
+        const attrs: Record<string, string> = {};
+        for (const a of Array.from(el.attributes)) {
+          attrs[a.name] = a.value.slice(0, 100);
+        }
+        return {
+          i,
+          tag: el.tagName.toLowerCase(),
+          id: el.id || undefined,
+          className:
+            el.className && typeof el.className === 'string'
+              ? el.className.slice(0, 100)
+              : undefined,
+          text,
+          attrs,
+        };
+      });
+    }),
+});
+
+export const domClick = tool({
+  description:
+    'Click the first element on the active tab that matches the given CSS selector. The element is scrolled into view first. Use domQuery first if you are not sure the selector is correct.',
+  parameters: z.object({
+    selector: z.string().describe('CSS selector of the element to click'),
+  }),
+  execute: async ({ selector }) =>
+    runOnActiveTab(() => {
+      const el = document.querySelector(selector) as HTMLElement | null;
+      if (!el) return { ok: false, error: `No element matched "${selector}"` };
+      el.scrollIntoView({ behavior: 'instant', block: 'center' });
+      el.click();
+      return {
+        ok: true,
+        tag: el.tagName.toLowerCase(),
+        text: (el.textContent ?? '').trim().slice(0, 60),
+      };
+    }),
+});
+
+export const domType = tool({
+  description:
+    'Type text into an <input>, <textarea>, or contenteditable element matched by selector. Uses the native value setter so React/Vue pick up the change, then dispatches `input` and `change` events.',
+  parameters: z.object({
+    selector: z.string().describe('CSS selector of the input/textarea/contenteditable'),
+    text: z.string().describe('The text to type'),
+  }),
+  execute: async ({ selector, text }) =>
+    runOnActiveTab(() => {
+      const el = document.querySelector(selector) as
+        | HTMLInputElement
+        | HTMLTextAreaElement
+        | null;
+      if (!el) return { ok: false, error: `No element matched "${selector}"` };
+      el.focus();
+      // Use the native setter so React/Vue pick up the value change.
+      const proto = Object.getPrototypeOf(el) as object;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) {
+        (setter as (v: string) => void).call(el, text);
+      } else {
+        el.value = text;
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true, tag: el.tagName.toLowerCase(), length: text.length };
+    }),
+});
+
+export const screenshot = tool({
+  description:
+    'Capture a screenshot of the active tab\'s currently visible viewport. ALWAYS call this before any UI action (click/type) so you can see what the page looks like. Returns the image plus viewport dimensions.',
+  parameters: z.object({}).strict(),
+  execute: async () => {
+    const tab = await getActiveTab();
+    if (tab.url && !tab.url.startsWith('http')) {
+      throw new Error(`Cannot capture non-http URL: ${tab.url}`);
+    }
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId as number, {
+      format: 'png',
+    });
+    return {
+      dataUrl,
+      width: tab.width ?? 0,
+      height: tab.height ?? 0,
+    };
+  },
+  // AI SDK v4: convert the dataURL result into a multi-modal content array
+  // so the model actually sees the image. The text caption helps the model
+  // know what it's looking at.
+  experimental_toToolResultContent: (output) => [
+    {
+      type: 'text',
+      text: `Screenshot captured (${output.width}x${output.height}px).`,
+    },
+    {
+      type: 'image',
+      data: output.dataUrl,
+      mimeType: 'image/png',
+    },
+  ],
+});
+
+export const allTools = {
+  domQuery,
+  domClick,
+  domType,
+  screenshot,
+};

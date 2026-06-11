@@ -199,11 +199,79 @@ export const tabsOpen = tool({
   },
 });
 
+export const pressKey = tool({
+  description:
+    'Send a keyboard event to the currently focused element. Use after domType to submit forms (Enter) or trigger shortcuts. Supports: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete.',
+  parameters: z.object({
+    key: z
+      .enum(['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete'])
+      .describe('The key to press.'),
+  }),
+  execute: async ({ key }) => {
+    return runOnActiveTab(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body) {
+        return { ok: false, error: 'No focused element. Click an input first.' };
+      }
+      const eventInit = {
+        key,
+        code: key,
+        keyCode: keyCodeFor(key),
+        which: keyCodeFor(key),
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      } as KeyboardEventInit;
+      el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+      // For Enter, also try to submit the enclosing form (covers Google etc.).
+      if (key === 'Enter') {
+        const form = el.closest('form');
+        if (form) {
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
+        }
+      }
+      el.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+      el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+      return { ok: true, key, tag: el.tagName.toLowerCase() };
+    });
+  },
+});
+
+function keyCodeFor(key: string): number {
+  switch (key) {
+    case 'Enter':
+      return 13;
+    case 'Tab':
+      return 9;
+    case 'Escape':
+      return 27;
+    case 'ArrowUp':
+      return 38;
+    case 'ArrowDown':
+      return 40;
+    case 'ArrowLeft':
+      return 37;
+    case 'ArrowRight':
+      return 39;
+    case 'Backspace':
+      return 8;
+    case 'Delete':
+      return 46;
+    default:
+      return 0;
+  }
+}
+
 export const allTools = {
   domQuery,
   domClick,
   domType,
   screenshot,
+  pressKey,
   tabsList,
   tabsSwitch,
   tabsOpen,

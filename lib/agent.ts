@@ -23,12 +23,12 @@ import type { StepUpdate } from '@/types/messages';
 const SYSTEM_PROMPT = `You are AgentSurfer, an AI browser agent that can see and control the active browser tab.
 
 WORKFLOW (always follow):
-1. BEFORE you act on any page, you must have a real http/https tab open and active. Use \`tabsList\` to see all open tabs, then either \`tabsSwitch\` to one that already matches your target (e.g., google.com for searches) or \`tabsOpen\` to open a new one. screenshot()/domQuery/domClick/domType only work on http/https tabs.
+1. BEFORE you act on any page, you must have a real http/https tab open and active. ALWAYS call \`tabsList\` first. If a matching tab already exists (e.g. google.com for searches, or the user's current page), call \`tabsSwitch\` to focus it. NEVER call \`tabsOpen\` with a URL that is already open in another tab — that creates a duplicate tab and wastes turns.
 2. Start by calling \`screenshot\` to see what is currently on the page.
 3. Use \`domQuery\` to inspect specific elements when you need structure / text / attributes.
 4. Take the minimum number of actions (click/type) needed to accomplish the user's goal.
 5. After any UI action, take another screenshot to verify the result.
-6. When the goal is achieved, reply with a concise plain-text summary.
+6. When the goal is achieved, reply with a concise plain-text summary. Do NOT keep calling tools after the goal is reached.
 
 CRITICAL — ACT, DON'T NARRATE:
 After you observe something (screenshot, domQuery, tabsList), your very next response MUST be a tool call (domQuery / domClick / domType / screenshot / tabsList / tabsSwitch / tabsOpen) or the final plain-text answer.
@@ -41,7 +41,7 @@ WHEN USING domType / domClick ON A SEARCH BOX:
   2. domType directly into the input (this works in most cases because the input accepts value even when not focused), OR
   3. domClick the input itself.
 - Prefer option (2) or (3) — fewer steps.
-- After typing, press Enter by either: clicking a button named "Search" / containing a magnifying-glass icon, OR using the JavaScript key event "Enter" via the browser. domType does not submit a form; you must call another tool.
+- After typing, submit the form with the \`pressKey\` tool (key: \"Enter\") — this also calls \`form.requestSubmit()\` so the page navigates to results. Never claim you pressed Enter without calling \`pressKey\`.
 
 RULES:
 - Never enter passwords, credit card numbers, OAuth tokens, or any other sensitive value without explicit user confirmation in the chat.
@@ -240,7 +240,12 @@ export async function runAgent(input: RunAgentInput): Promise<void> {
   //    call `consumeStream()` to actually drain it and fire onChunk /
   //    onStepFinish callbacks.
   await result.consumeStream();
-  const finalText = await result.text;
+  let finalText = (await result.text).trim();
+  // Fallback: the model ran 30 steps of tool calls and never wrote a final
+  // summary. Emit a default one so the chat isn't empty.
+  if (!finalText) {
+    finalText = `Agent ran ${stepCounter} step(s) but didn't produce a final summary. See the step trace above.`;
+  }
   await appendMessage({
     sessionId: input.sessionId,
     role: 'assistant',

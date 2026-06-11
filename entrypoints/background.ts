@@ -166,11 +166,23 @@ async function handleMessage(
       // E2E-only: write a config straight to Dexie. Caller is expected to
       // have authenticated this request somehow (test launcher only).
       console.log('[SW __e2e:seed-config] writing:', message.config.id, message.config.provider);
-      await upsertConfig(message.config);
-      await setActiveConfig(message.config.id);
-      const verify = await db.modelConfigs.get(message.config.id);
-      console.log('[SW __e2e:seed-config] verify stored:', !!verify, 'isDefault=', verify?.isDefault);
-      return { ok: true, seeded: message.config.id };
+      try {
+        await upsertConfig(message.config);
+        console.log('[SW __e2e:seed-config] upsertConfig OK');
+        await setActiveConfig(message.config.id);
+        console.log('[SW __e2e:seed-config] setActiveConfig OK');
+        const verify = await db.modelConfigs.get(message.config.id);
+        console.log('[SW __e2e:seed-config] verify:', JSON.stringify({
+          found: !!verify,
+          isDefault: verify?.isDefault,
+          modelId: verify?.modelId,
+          apiKeyLen: verify?.apiKey?.length,
+        }));
+        return { ok: true, seeded: message.config.id, verified: !!verify };
+      } catch (err) {
+        console.error('[SW __e2e:seed-config] FAILED:', err);
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
     }
 
     case '__e2e:inspect': {

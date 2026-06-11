@@ -110,7 +110,9 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
     const configId = `e2e-${provider}-${Date.now()}`;
     // Send the message WITHOUT resetting first — `db.delete()` + reopen
     // can race with the open() of a freshly-reloaded side panel.
-    await page.evaluate(
+    // Also: render a visible marker on the page so the screenshot shows
+    // the seed result even if the side panel state is otherwise wrong.
+    const seedRes = await page.evaluate(
       async ({ configId, provider, apiKey }) => {
         // @ts-expect-error injected in the page context
         const cfg = {
@@ -123,28 +125,36 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
           isDefault: true,
           createdAt: Date.now(),
         };
-        const r1 = await chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg });
-        // Inspect the DB right back to verify (still in SW context).
-        const r2 = await chrome.runtime.sendMessage({ type: '__e2e:inspect' });
-        // @ts-expect-error bridge for the page console
-        window.__e2e_seed_result = { seed: r1, inspect: r2 };
+        let r1: unknown, r1Err: unknown;
+        try {
+          r1 = await chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg });
+        } catch (e) {
+          r1Err = String(e);
+        }
+        let r2: unknown, r2Err: unknown;
+        try {
+          r2 = await chrome.runtime.sendMessage({ type: '__e2e:inspect' });
+        } catch (e) {
+          r2Err = String(e);
+        }
+        // Render a visible marker that survives across reloads (it's in
+        // the page DOM, not Dexie).
+        const old = document.getElementById('__e2e-marker');
+        if (old) old.remove();
+        const m = document.createElement('div');
+        m.id = '__e2e-marker';
+        m.dataset.seed = JSON.stringify(r1);
+        m.dataset.seedErr = r1Err ? String(r1Err) : '';
+        m.dataset.inspect = JSON.stringify(r2);
+        m.dataset.inspectErr = r2Err ? String(r2Err) : '';
+        m.style.cssText = 'position:fixed;bottom:0;left:0;background:lime;color:black;padding:4px;z-index:99999;font:11px monospace;max-width:100%;word-break:break-all;';
+        m.textContent = `seed=${JSON.stringify(r1).slice(0, 200)} inspect=${JSON.stringify(r2).slice(0, 200)}`;
+        document.body.appendChild(m);
+        return { r1, r1Err, r2, r2Err };
       },
       { configId, provider, apiKey },
     );
-    // Surface the result in the test runner.
-    const res = await page.evaluate(() =>
-      // @ts-expect-error injected
-      window.__e2e_seed_result,
-    );
-    console.log('[seed result]', JSON.stringify(res));
-    try {
-      appendFileSync(
-        path.resolve('.e2e-logs/seed.log'),
-        `${Date.now()} ${JSON.stringify(res)}\n`,
-      );
-    } catch {
-      // ignore
-    }
+    console.log('[seed result]', JSON.stringify(seedRes));
   }
 
   async function cleanup() {

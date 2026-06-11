@@ -19,6 +19,11 @@
     "mock-llm": "bun run scripts/mock-llm.ts",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
+    "e2e:debug": "playwright test --debug",
+    "e2e:live": "playwright test --grep @live",
+    "e2e:serve": "bun run e2e/fixtures/serve.ts",
+    "test:minimax": "bun run scripts/test-minimax.ts",
+    "test:mimo": "bun run scripts/test-mimo.ts",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

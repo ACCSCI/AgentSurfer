@@ -5,6 +5,8 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModelV1 } from 'ai';
+import { MockLanguageModelV1 } from 'ai/test';
+import { createMockModel } from '@/lib/mock-scripts';
 import type { ModelConfig, Provider } from '@/types';
 
 // NOTE: as of writing (Jun 2026), @ai-sdk/openai-compatible@1.0.39 bundles
@@ -29,6 +31,7 @@ export const KnownModels: Record<Provider, readonly string[]> = {
   'openai-compatible-2': [],
   mimo: ['mimo-v2.5-pro'],
   MiniMax: ['MiniMax-M3'],
+  mock: ['mock:happy', 'mock:oneTool', 'mock:textOnly', 'mock:clickSequence', 'mock:failsAtStep3'],
 };
 
 export function listModels(provider: Provider): readonly string[] {
@@ -79,13 +82,22 @@ function createModelInternal(config: ModelConfig): AnyLanguageModel {
     }
 
     case 'MiniMax': {
-      // MiniMax exposes an Anthropic-Messages-compatible endpoint at the
-      // inference gateway. The model id is `MiniMax-M3` (MiniMax's own series).
-      const provider = createAnthropic({
-        baseURL: 'https://api.minimaxi.com',
+      // MiniMax exposes an OpenAI-compatible chat-completions endpoint at
+      // the inference gateway `https://api.minimaxi.com/v1/chat/completions`.
+      // Auth: `Authorization: Bearer <key>`. Model: `MiniMax-M3`.
+      // Verified live on 2026-06-11 via `bun run test:minimax`.
+      const provider = createOpenAICompatible({
+        name: 'MiniMax',
+        baseURL: 'https://api.minimaxi.com/v1',
         apiKey: config.apiKey,
       });
       return provider(config.modelId);
+    }
+
+    case 'mock': {
+      // In-process mock used by E2E. `modelId` encodes the script to play.
+      // See lib/mock-scripts.ts for available scripts.
+      return createMockModel(config.modelId) as unknown as LanguageModelV1;
     }
 
     default: {

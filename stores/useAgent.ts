@@ -3,13 +3,17 @@
 // happens in the service worker via Dexie; this store is a UI-side mirror.
 
 import { create } from 'zustand';
-import type { AgentStep } from '@/types/agent';
+import type { AgentStep, ToolCall } from '@/types/agent';
 import type { StepUpdate } from '@/types/messages';
 
 interface AgentState {
   runId: string | null;
   isRunning: boolean;
   currentStep: StepUpdate | null;
+  // Live, streaming deltas from the model (text + tool call deltas).
+  // Reset at the start of each step; appended to as onChunk fires.
+  currentText: string;
+  currentToolCalls: ToolCall[];
   // Per-step live result count, so the UI can show "running tool X" badges.
   runningTools: Record<string, 'pending' | 'ok' | 'error'>;
   abortController: AbortController | null;
@@ -18,6 +22,8 @@ interface AgentState {
   start: (runId: string) => AbortController;
   cancel: () => void;
   setStep: (step: StepUpdate) => void;
+  appendText: (text: string) => void;
+  addStreamingToolCall: (tc: ToolCall) => void;
   markTool: (toolCallId: string, status: 'pending' | 'ok' | 'error') => void;
   finish: (totalUsage?: { prompt: number; completion: number }) => void;
   fail: (message: string) => void;
@@ -28,6 +34,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   runId: null,
   isRunning: false,
   currentStep: null,
+  currentText: '',
+  currentToolCalls: [],
   runningTools: {},
   abortController: null,
   error: null,
@@ -38,6 +46,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       runId,
       isRunning: true,
       currentStep: null,
+      currentText: '',
+      currentToolCalls: [],
       runningTools: {},
       abortController: ac,
       error: null,
@@ -50,7 +60,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     if (ac) ac.abort();
   },
 
-  setStep: (step) => set({ currentStep: step }),
+  setStep: (step) =>
+    set({
+      currentStep: step,
+      // Reset the streaming buffer for the new step.
+      currentText: '',
+      currentToolCalls: [],
+    }),
+
+  appendText: (text) =>
+    set((s) => ({ currentText: s.currentText + text })),
+
+  addStreamingToolCall: (tc) =>
+    set((s) => ({ currentToolCalls: [...s.currentToolCalls, tc] })),
 
   markTool: (toolCallId, status) =>
     set((s) => ({ runningTools: { ...s.runningTools, [toolCallId]: status } })),
@@ -60,6 +82,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       isRunning: false,
       abortController: null,
       currentStep: null,
+      currentText: '',
+      currentToolCalls: [],
     }),
 
   fail: (message) =>
@@ -67,6 +91,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       isRunning: false,
       abortController: null,
       error: message,
+      currentText: '',
+      currentToolCalls: [],
     }),
 
   reset: () =>
@@ -74,6 +100,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       runId: null,
       isRunning: false,
       currentStep: null,
+      currentText: '',
+      currentToolCalls: [],
       runningTools: {},
       abortController: null,
       error: null,

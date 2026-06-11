@@ -46,7 +46,9 @@ export const DefaultModelId: Record<Provider, string> = {
   'openai-compatible-1': '',
   'openai-compatible-2': '',
   mimo: 'mimo-v2.5-pro',
-  MiniMax: 'MiniMax-M3',
+  // M2.7-highspeed is the project default per the user's request — fast,
+  // stable, supported by the Anthropic-compat endpoint.
+  MiniMax: 'MiniMax-M2.7-highspeed',
   // `mock:happy` is the default scripted run used by E2E specs.
   mock: 'mock:happy',
 };

@@ -27,13 +27,32 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
   );
 
   const currentStep = useAgentStore((s) => s.currentStep);
+  const currentText = useAgentStore((s) => s.currentText);
+  const currentToolCalls = useAgentStore((s) => s.currentToolCalls);
+  const error = useAgentStore((s) => s.error);
+  const isRunning = useAgentStore((s) => s.isRunning);
+
+  // Helper for the live tool-call chips at the bottom of the chat.
+  function summarizeArgs(args: Record<string, unknown>): string {
+    const keys = Object.keys(args);
+    if (keys.length === 0) return '';
+    const preview = keys
+      .slice(0, 2)
+      .map((k) => `${k}=${shortVal(args[k])}`)
+      .join(', ');
+    return keys.length > 2 ? `${preview}, +${keys.length - 2}` : preview;
+  }
+  function shortVal(v: unknown): string {
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    return s.length > 40 ? `${s.slice(0, 40)}…` : s;
+  }
 
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, currentStep?.stepNumber]);
+  }, [messages.length, currentStep?.stepNumber, error]);
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !isRunning && !error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted-foreground">
         <p>Ask the agent to do something on the active tab.</p>
@@ -52,8 +71,39 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
           message={m}
           steps={stepsByMessage.get(m.id) ?? []}
           isLive={currentStep?.stepNumber != null && m.role === 'assistant'}
+          liveText={m.role === 'assistant' && m === messages[messages.length - 1] ? currentText : ''}
+          liveToolCalls={
+            m.role === 'assistant' && m === messages[messages.length - 1] ? currentToolCalls : []
+          }
         />
       ))}
+      {isRunning && messages.length > 0 && messages[messages.length - 1]?.role === 'user' && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
+          Agent is running…
+        </div>
+      )}
+      {isRunning && currentToolCalls.length > 0 && (
+        <div className="space-y-1">
+          {currentToolCalls.map((tc) => (
+            <div
+              key={tc.id}
+              className="rounded border border-dashed border-primary/50 bg-primary/5 p-2 font-mono text-[11px]"
+            >
+              <span className="text-primary">→</span> {tc.name}
+              {Object.keys(tc.args).length > 0 && (
+                <span className="ml-1 text-muted-foreground">({summarizeArgs(tc.args)})</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {error && (
+        <div className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+          <div className="font-semibold">Agent error</div>
+          <div className="mt-1 whitespace-pre-wrap break-words">{error}</div>
+        </div>
+      )}
       <div ref={bottomRef} />
     </div>
   );

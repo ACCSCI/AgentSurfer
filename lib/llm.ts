@@ -3,10 +3,7 @@
 
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModelV1 } from 'ai';
-import { MockLanguageModelV1 } from 'ai/test';
-import { createMockModel } from '@/lib/mock-scripts';
 import type { ModelConfig, Provider } from '@/types';
 
 // NOTE: as of writing (Jun 2026), @ai-sdk/openai-compatible@1.0.39 bundles
@@ -15,7 +12,7 @@ import type { ModelConfig, Provider } from '@/types';
 // Runtime is fine — `streamText` accepts both — but the return type
 // doesn't unify. We widen to `any` and add the V1 cast to keep call sites
 // typed. Will go away once we upgrade to `ai@5` + matching provider majors.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// biome-ignore lint/suspicious/noExplicitAny: V1/V2 return-type mismatch
 type AnyLanguageModel = any;
 
 // Known model IDs per provider — used to populate the dropdown in the options
@@ -30,7 +27,15 @@ export const KnownModels: Record<Provider, readonly string[]> = {
   'openai-compatible-1': [],
   'openai-compatible-2': [],
   mimo: ['mimo-v2.5-pro'],
-  MiniMax: ['MiniMax-M3'],
+  MiniMax: [
+    'MiniMax-M2.7',
+    'MiniMax-M2.7-highspeed',
+    'MiniMax-M2.5',
+    'MiniMax-M2.5-highspeed',
+    'MiniMax-M2.1',
+    'MiniMax-M2.1-highspeed',
+    'MiniMax-M2',
+  ],
   mock: ['mock:happy', 'mock:oneTool', 'mock:textOnly', 'mock:clickSequence', 'mock:failsAtStep3'],
 };
 
@@ -38,12 +43,11 @@ export function listModels(provider: Provider): readonly string[] {
   return KnownModels[provider] ?? [];
 }
 
-export function createModel(config: ModelConfig): LanguageModelV1 {
-  // See note above re: V1/V2 mismatch. Cast is safe at runtime.
-  return createModelInternal(config) as unknown as LanguageModelV1;
+export async function createModel(config: ModelConfig): Promise<LanguageModelV1> {
+  return (await createModelInternal(config)) as unknown as LanguageModelV1;
 }
 
-function createModelInternal(config: ModelConfig): AnyLanguageModel {
+async function createModelInternal(config: ModelConfig): Promise<AnyLanguageModel> {
   switch (config.provider) {
     case 'openai': {
       return createOpenAI({ apiKey: config.apiKey })(config.modelId);
@@ -58,8 +62,7 @@ function createModelInternal(config: ModelConfig): AnyLanguageModel {
       if (!config.baseUrl) {
         throw new Error(`${config.provider} requires a baseUrl`);
       }
-      const provider = createOpenAICompatible({
-        name: config.provider,
+      const provider = createOpenAI({
         baseURL: config.baseUrl,
         apiKey: config.apiKey,
       });
@@ -68,10 +71,10 @@ function createModelInternal(config: ModelConfig): AnyLanguageModel {
 
     case 'mimo': {
       // Xiaomi MiMo uses an `api-key: <key>` header instead of `Authorization:
-      // Bearer`. The underlying OpenAI client also adds `Authorization`, which
-      // the server ignores — but we override the key in headers too for safety.
-      const provider = createOpenAICompatible({
-        name: 'mimo',
+      // Bearer`. We use createOpenAI (v1 protocol) with a custom baseURL and
+      // override the apiKey header. createOpenAICompatible@1.x is v2-protocol
+      // and is rejected by AI SDK 4.
+      const provider = createOpenAI({
         baseURL: 'https://api.xiaomimimo.com/v1',
         apiKey: config.apiKey,
         headers: {
@@ -82,22 +85,30 @@ function createModelInternal(config: ModelConfig): AnyLanguageModel {
     }
 
     case 'MiniMax': {
-      // MiniMax exposes an OpenAI-compatible chat-completions endpoint at
-      // the inference gateway `https://api.minimaxi.com/v1/chat/completions`.
-      // Auth: `Authorization: Bearer <key>`. Model: `MiniMax-M3`.
-      // Verified live on 2026-06-11 via `bun run test:minimax`.
-      const provider = createOpenAICompatible({
-        name: 'MiniMax',
-        baseURL: 'https://api.minimaxi.com/v1',
+      // MiniMax's official AI SDK provider (`vercel-minimax-ai-provider@0.0.2`)
+      // is built for AI SDK v5 and returns LanguageModelV2, which our pinned
+      // `ai@4.3.19` rejects at runtime. Until we upgrade to AI SDK v5, we
+      // hand-roll the Anthropic-compatible call using @ai-sdk/anthropic@1.x
+      // (which is still v1-protocol) and override the baseURL.
+      //
+      // NOTE: @ai-sdk/anthropic constructs the URL as `${baseURL}/messages`
+      // (NOT `/v1/messages`). To hit MiniMax's
+      // `https://api.minimaxi.com/anthropic/v1/messages` we have to include
+      // `/v1` in the baseURL. Verified live on 2026-06-11.
+      const provider = createAnthropic({
+        baseURL: 'https://api.minimaxi.com/anthropic/v1',
         apiKey: config.apiKey,
       });
       return provider(config.modelId);
     }
 
     case 'mock': {
-      // In-process mock used by E2E. `modelId` encodes the script to play.
+      // In-process mock used by E2E. Dynamic-imported so the production
+      // bundle never pulls in `ai/test` (which drags Node-only modules
+      // like `http`/`zlib`/`net`/`stream` through Vite).
       // See lib/mock-scripts.ts for available scripts.
-      return createMockModel(config.modelId) as unknown as LanguageModelV1;
+      const { createMockModel } = await import('@/lib/mock-scripts');
+      return createMockModel(config.modelId);
     }
 
     default: {

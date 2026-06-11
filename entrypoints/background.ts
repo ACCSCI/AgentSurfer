@@ -3,7 +3,8 @@
 // always chrome.storage or Dexie.
 
 import { runAgent } from '@/lib/agent';
-import { db, getActiveConfig } from '@/lib/db';
+import { db, getActiveConfig, setActiveConfig, upsertConfig } from '@/lib/db';
+import type { ModelConfig } from '@/types';
 import type { StepUpdate } from '@/types/messages';
 
 export default defineBackground(() => {
@@ -42,7 +43,9 @@ type IncomingMessage =
   | { type: 'agent:start'; payload: { runId: string; sessionId: string; prompt: string } }
   | { type: 'agent:cancel'; runId: string }
   | { type: 'screenshot:capture' }
-  | { type: 'agent:list' };
+  | { type: 'agent:list' }
+  | { type: '__e2e:seed-config'; config: ModelConfig }
+  | { type: '__e2e:reset' };
 
 async function handleMessage(
   message: IncomingMessage,
@@ -75,6 +78,24 @@ async function handleMessage(
           // No listeners (side panel closed) — safe to ignore.
         });
       };
+      const log = (...args: unknown[]) => {
+        const line = `[SW ${runId}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`;
+        console.log(line);
+        broadcast({ type: '__sw:log', line });
+      };
+      // also forward console.log from agent.ts to the test runner
+      const origConsoleLog = console.log;
+      const origConsoleError = console.error;
+      console.log = (...args: unknown[]) => {
+        origConsoleLog(...args);
+        broadcast({ type: '__sw:log', line: '[AgentSurfer] ' + args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') });
+      };
+      console.error = (...args: unknown[]) => {
+        origConsoleError(...args);
+        broadcast({ type: '__sw:log', line: '[AgentSurfer][err] ' + args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') });
+      };
+
+      log('agent:start', { sessionId, promptPreview: prompt.slice(0, 80), provider: config.provider, modelId: config.modelId });
 
       // Run async; resolve the message once the agent is started so the UI
       // can show the "running" state. The agent itself keeps running.
@@ -84,17 +105,33 @@ async function handleMessage(
         config,
         abortSignal: ac.signal,
         onStep: (step: StepUpdate) => {
+          log('agent:step', step.stepNumber, 'toolCalls=' + step.toolCalls.length, 'toolResults=' + step.toolResults.length);
           broadcast({ type: 'agent:step', runId, step });
         },
+        onChunk: (chunk) => {
+          const c = chunk as { type: string };
+          if (c.type === 'text-delta' || c.type === 'reasoning' || c.type === 'reasoning-delta') {
+            log('agent:chunk', c.type, JSON.stringify((chunk as { textDelta?: string }).textDelta));
+          } else if (c.type === 'tool-call' || c.type === 'tool-call-delta') {
+            const tc = chunk as { toolName?: string; toolCallId?: string; argsTextDelta?: string };
+            log('agent:chunk', c.type, tc.toolName, tc.toolCallId, JSON.stringify(tc.argsTextDelta));
+          } else {
+            log('agent:chunk', c.type);
+          }
+          broadcast({ type: 'agent:chunk', runId, chunk });
+        },
         onError: (err) => {
+          log('agent:error', err.message, err.stack?.split('\n').slice(0, 3).join(' | '));
           broadcast({ type: 'agent:error', runId, message: err.message });
           inflight.delete(runId);
         },
         onDone: (info) => {
+          log('agent:done', info);
           broadcast({ type: 'agent:done', runId, totalUsage: info.totalUsage });
           inflight.delete(runId);
         },
       }).catch((err) => {
+        log('agent:caught', err instanceof Error ? err.message : String(err));
         broadcast({
           type: 'agent:error',
           runId,
@@ -120,6 +157,22 @@ async function handleMessage(
       // For debugging — list recent sessions.
       const recent = await db.sessions.orderBy('updatedAt').reverse().limit(10).toArray();
       return { sessions: recent };
+    }
+
+    case '__e2e:seed-config': {
+      // E2E-only: write a config straight to Dexie. Caller is expected to
+      // have authenticated this request somehow (test launcher only).
+      await upsertConfig(message.config);
+      await setActiveConfig(message.config.id);
+      return { ok: true, seeded: message.config.id };
+    }
+
+    case '__e2e:reset': {
+      // E2E-only: wipe the Dexie database. Used between tests for isolation.
+      await db.delete();
+      // Re-open the connection so subsequent calls don't fail.
+      await db.open();
+      return { ok: true };
     }
 
     default: {

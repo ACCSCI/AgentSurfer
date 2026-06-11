@@ -149,9 +149,62 @@ export const screenshot = tool({
   ],
 });
 
+// ---------- Tab management ----------
+
+export const tabsList = tool({
+  description:
+    'List all open tabs across all windows. Each entry has id, windowId, title, url, and whether the tab is active. Use this before taking screenshots or acting on the page, so you can pick the right tab and switch to it.',
+  parameters: z.object({}).strict(),
+  execute: async () => {
+    const tabs = await chrome.tabs.query({});
+    return tabs
+      .filter((t) => t.id != null)
+      .map((t) => ({
+        id: t.id as number,
+        windowId: t.windowId,
+        title: t.title ?? '',
+        url: t.url ?? '',
+        active: t.active,
+        status: t.status,
+      }));
+  },
+});
+
+export const tabsSwitch = tool({
+  description:
+    'Make a specific tab the active tab. Pass the tab id from tabsList. After this call, screenshot() and DOM tools will see that tab.',
+  parameters: z.object({
+    tabId: z.number().int().describe('The tab id (from tabsList) to activate.'),
+  }),
+  execute: async ({ tabId }) => {
+    await chrome.tabs.update(tabId, { active: true });
+    // Small delay to let the tab finish swapping in.
+    await new Promise((r) => setTimeout(r, 200));
+    const tab = await chrome.tabs.get(tabId);
+    return { ok: true, id: tab.id, url: tab.url, title: tab.title };
+  },
+});
+
+export const tabsOpen = tool({
+  description:
+    'Open a new tab at the given URL and make it the active tab. Use this when the page you need is not already open.',
+  parameters: z.object({
+    url: z.string().url().describe('The full URL to open (must include https://).'),
+  }),
+  execute: async ({ url }) => {
+    const tab = await chrome.tabs.create({ url, active: true });
+    // Wait for the tab to start loading; can't easily wait for full load.
+    await new Promise((r) => setTimeout(r, 1500));
+    return { ok: true, id: tab.id, url: tab.url, title: tab.title };
+  },
+});
+
 export const allTools = {
   domQuery,
   domClick,
   domType,
   screenshot,
+  tabsList,
+  tabsSwitch,
+  tabsOpen,
 };

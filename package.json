@@ -21,6 +21,7 @@
     "e2e:headed": "playwright test --headed",
     "e2e:debug": "playwright test --debug",
     "e2e:live": "playwright test --grep @live",
+    "e2e:real": "playwright test e2e/specs/04-real-google-search.spec.ts --headed",
     "e2e:serve": "bun run e2e/fixtures/serve.ts",
     "test:minimax": "bun run scripts/test-minimax.ts",
     "test:mimo": "bun run scripts/test-mimo.ts",
@@ -52,6 +53,7 @@
     "sonner": "^1.7.1",
     "tailwind-merge": "^2.6.0",
     "tailwindcss-animate": "^1.0.7",
+    "vercel-minimax-ai-provider": "^0.0.2",
     "zod": "^3.24.1",
     "zustand": "^5.0.2"
   },

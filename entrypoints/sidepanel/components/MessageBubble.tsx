@@ -8,19 +8,24 @@ export function MessageBubble({
   message,
   steps,
   isLive,
+  liveText = '',
+  liveToolCalls = [],
 }: {
   message: ChatMessage;
   steps: AgentStep[];
   isLive: boolean;
+  liveText?: string;
+  liveToolCalls?: import('@/types/agent').ToolCall[];
 }) {
   const isUser = message.role === 'user';
-  const text = message.parts
+  const baseText = message.parts
     .filter((p) => p.type === 'text')
     .map((p) => p.text ?? '')
     .join('\n');
+  const text = isLive && liveText ? baseText + liveText : baseText;
 
   return (
-    <div className={cn('flex gap-2', isUser ? 'flex-row-reverse' : 'flex-row')}>
+    <div className={cn('flex gap-2', isUser ? 'flex-row-reverse' : 'flex-row')} data-testid="message-bubble">
       <div
         className={cn(
           'flex h-7 w-7 shrink-0 items-center justify-center rounded-full',
@@ -40,12 +45,30 @@ export function MessageBubble({
             )}
           >
             {text}
+            {isLive && liveText && (
+              <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-current align-middle" />
+            )}
           </div>
         )}
         {steps.length > 0 && (
           <div className="space-y-1">
             {steps.map((s) => (
               <StepRow key={s.id} step={s} isLatest={isLive && s.stepNumber === steps.length} />
+            ))}
+          </div>
+        )}
+        {isLive && liveToolCalls.length > 0 && (
+          <div className="space-y-1">
+            {liveToolCalls.map((tc) => (
+              <div
+                key={tc.id}
+                className="rounded border border-dashed border-primary/50 bg-primary/5 p-2 font-mono text-[11px]"
+              >
+                <span className="text-primary">→</span> {tc.name}
+                {Object.keys(tc.args).length > 0 && (
+                  <span className="ml-1 text-muted-foreground">({summarizeArgs(tc.args)})</span>
+                )}
+              </div>
             ))}
           </div>
         )}

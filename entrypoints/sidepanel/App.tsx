@@ -20,6 +20,8 @@ export default function App() {
   const settingsReady = useSettingsStore((s) => s.ready);
   const setStep = useAgentStore((s) => s.setStep);
   const setRunId = useAgentStore((s) => s.start);
+  const appendText = useAgentStore((s) => s.appendText);
+  const addStreamingToolCall = useAgentStore((s) => s.addStreamingToolCall);
   const cancelRun = useAgentStore((s) => s.cancel);
   const finishRun = useAgentStore((s) => s.finish);
   const failRun = useAgentStore((s) => s.fail);
@@ -50,6 +52,10 @@ export default function App() {
   finishRef.current = finishRun;
   const failRef = useRef(failRun);
   failRef.current = failRun;
+  const appendTextRef = useRef(appendText);
+  appendTextRef.current = appendText;
+  const addTcRef = useRef(addStreamingToolCall);
+  addTcRef.current = addStreamingToolCall;
 
   useEffect(() => {
     const listener = (message: { type?: string; [k: string]: unknown }) => {
@@ -59,11 +65,35 @@ export default function App() {
         finishRef.current();
       } else if (message.type === 'agent:error') {
         failRef.current(String((message as { message?: string }).message ?? 'Agent error'));
+      } else if (message.type === 'agent:chunk') {
+        const c = (message as { chunk?: { type: string; [k: string]: unknown } }).chunk;
+        if (!c) return;
+        if (c.type === 'text-delta' && typeof c.textDelta === 'string') {
+          appendTextRef.current(c.textDelta);
+        } else if (c.type === 'tool-call' && c.toolCallId && c.toolName) {
+          addTcRef.current({
+            id: c.toolCallId as string,
+            name: c.toolName as string,
+            args: (typeof c.args === 'string' ? safeJson(c.args) : (c.args as Record<string, unknown>)) ?? {},
+          });
+        }
+      } else if (message.type === '__sw:log') {
+        // Bridge SW logs into the page console so the test runner can see them.
+        // eslint-disable-next-line no-console
+        console.log((message as { line: string }).line);
       }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
+
+  function safeJson(s: string): Record<string, unknown> {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return {};
+    }
+  }
 
   function openSettings() {
     chrome.runtime.openOptionsPage();

@@ -3,7 +3,10 @@
 // the side panel / options page and seeding Dexie with a test config.
 
 import { type BrowserContext, chromium, type Page } from '@playwright/test';
+import { appendFileSync } from 'node:fs';
 import path from 'node:path';
+
+const SW_LOG = path.resolve('.e2e-logs/sw.log');
 
 const EXTENSION_PATH = path.resolve('.output/chrome-mv3');
 
@@ -37,22 +40,30 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
 
   // Forward SW console + network to the test runner so we can see what's
   // happening. SW pages are also Pages from Playwright's perspective.
+  const swLog = (line: string) => {
+    console.log(line);
+    try {
+      appendFileSync(SW_LOG, line + '\n');
+    } catch {
+      // ignore
+    }
+  };
   sw.on('console', (msg) => {
-    console.log(`[SW:${msg.type()}]`, msg.text());
+    swLog(`[SW:${msg.type()}] ${msg.text()}`);
   });
   sw.on('request', (req) => {
     if (req.url().includes('anthropic') || req.url().includes('minimaxi') || req.url().includes('xiaomimimo')) {
-      console.log(`[SW:req]`, req.method(), req.url(), JSON.stringify(req.postData()?.slice(0, 200)));
+      swLog(`[SW:req] ${req.method()} ${req.url()} ${JSON.stringify(req.postData()?.slice(0, 200))}`);
     }
   });
   sw.on('response', (res) => {
     if (res.url().includes('anthropic') || res.url().includes('minimaxi') || res.url().includes('xiaomimimo')) {
-      console.log(`[SW:res]`, res.status(), res.url());
+      swLog(`[SW:res] ${res.status()} ${res.url()}`);
     }
   });
   sw.on('requestfailed', (req) => {
     if (req.url().includes('anthropic') || req.url().includes('minimaxi') || req.url().includes('xiaomimimo')) {
-      console.log(`[SW:req-failed]`, req.url(), req.failure()?.errorText);
+      swLog(`[SW:req-failed] ${req.url()} ${req.failure()?.errorText}`);
     }
   });
 
@@ -97,6 +108,8 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
    */
   async function seedLiveConfig(page: Page, provider: 'MiniMax' | 'mimo', apiKey: string) {
     const configId = `e2e-${provider}-${Date.now()}`;
+    // Send the message WITHOUT resetting first — `db.delete()` + reopen
+    // can race with the open() of a freshly-reloaded side panel.
     await page.evaluate(
       async ({ configId, provider, apiKey }) => {
         // @ts-expect-error injected in the page context
@@ -110,11 +123,28 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
           isDefault: true,
           createdAt: Date.now(),
         };
-        await chrome.runtime.sendMessage({ type: '__e2e:reset' });
-        await chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg });
+        const r1 = await chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg });
+        // Inspect the DB right back to verify (still in SW context).
+        const r2 = await chrome.runtime.sendMessage({ type: '__e2e:inspect' });
+        // @ts-expect-error bridge for the page console
+        window.__e2e_seed_result = { seed: r1, inspect: r2 };
       },
       { configId, provider, apiKey },
     );
+    // Surface the result in the test runner.
+    const res = await page.evaluate(() =>
+      // @ts-expect-error injected
+      window.__e2e_seed_result,
+    );
+    console.log('[seed result]', JSON.stringify(res));
+    try {
+      appendFileSync(
+        path.resolve('.e2e-logs/seed.log'),
+        `${Date.now()} ${JSON.stringify(res)}\n`,
+      );
+    } catch {
+      // ignore
+    }
   }
 
   async function cleanup() {

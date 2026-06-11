@@ -24,11 +24,13 @@ export default defineBackground(() => {
   const inflight = new Map<string, AbortController>();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    console.log('[SW raw]', JSON.stringify({ type: (message as { type?: string })?.type, hasConfig: !!(message as { config?: unknown })?.config }));
     (async () => {
       try {
         const result = await handleMessage(message, sender, inflight);
         sendResponse({ ok: true, data: result });
       } catch (err) {
+        console.error('[SW handler error]', err);
         sendResponse({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
@@ -45,7 +47,8 @@ type IncomingMessage =
   | { type: 'screenshot:capture' }
   | { type: 'agent:list' }
   | { type: '__e2e:seed-config'; config: ModelConfig }
-  | { type: '__e2e:reset' };
+  | { type: '__e2e:reset' }
+  | { type: '__e2e:inspect' };
 
 async function handleMessage(
   message: IncomingMessage,
@@ -162,16 +165,27 @@ async function handleMessage(
     case '__e2e:seed-config': {
       // E2E-only: write a config straight to Dexie. Caller is expected to
       // have authenticated this request somehow (test launcher only).
+      console.log('[SW __e2e:seed-config] writing:', message.config.id, message.config.provider);
       await upsertConfig(message.config);
       await setActiveConfig(message.config.id);
+      const verify = await db.modelConfigs.get(message.config.id);
+      console.log('[SW __e2e:seed-config] verify stored:', !!verify, 'isDefault=', verify?.isDefault);
       return { ok: true, seeded: message.config.id };
+    }
+
+    case '__e2e:inspect': {
+      const configs = await db.modelConfigs.toArray();
+      const sessions = await db.sessions.toArray();
+      return { ok: true, configs: configs.length, sessions: sessions.length, configsData: configs };
     }
 
     case '__e2e:reset': {
       // E2E-only: wipe the Dexie database. Used between tests for isolation.
+      console.log('[SW __e2e:reset] deleting Dexie...');
       await db.delete();
-      // Re-open the connection so subsequent calls don't fail.
+      console.log('[SW __e2e:reset] re-opening Dexie...');
       await db.open();
+      console.log('[SW __e2e:reset] done');
       return { ok: true };
     }
 

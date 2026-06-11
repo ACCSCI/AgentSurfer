@@ -5,6 +5,7 @@
 
 import { tool } from 'ai';
 import { z } from 'zod';
+import { smartScreenshot } from '@/lib/screenshot-smart';
 
 // ---------- Helpers ----------
 
@@ -117,36 +118,93 @@ export const domType = tool({
 
 export const screenshot = tool({
   description:
-    'Capture a screenshot of the active tab\'s currently visible viewport. ALWAYS call this before any UI action (click/type) so you can see what the page looks like. Returns the image plus viewport dimensions.',
-  parameters: z.object({}).strict(),
-  execute: async () => {
-    const tab = await getActiveTab();
-    if (tab.url && !tab.url.startsWith('http')) {
-      throw new Error(`Cannot capture non-http URL: ${tab.url}`);
-    }
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId as number, {
-      format: 'png',
-    });
-    return {
-      dataUrl,
-      width: tab.width ?? 0,
-      height: tab.height ?? 0,
-    };
+    `Smart screenshot of the active tab's visible viewport. Multiple modes:
+- no args: single full-page shot (returned as image + text caption).
+- { region: {x,y,width,height} }: crop to a region, returns just that crop.
+- { schedule: {durationMs, intervalMs} }: capture N frames over time, return ONLY metadata (index, timestamp, changeFromBaseline, changedFraction, bbox) — NO images. The model picks which indices to view next.
+- { refs: [0, 5, 7] }: fetch specific frames from the most recent schedule run.
+
+Use the schedule mode to detect when a page finishes loading, when a modal appears, etc., without paying image-token cost for every frame. The bbox tells you WHERE on the page the change happened.
+
+ALWAYS call screenshot before any UI action so you know the page state.`,
+  parameters: z
+    .object({
+      region: z
+        .object({
+          x: z.number().int().min(0),
+          y: z.number().int().min(0),
+          width: z.number().int().min(1).max(8000),
+          height: z.number().int().min(1).max(8000),
+        })
+        .optional()
+        .describe('Crop the screenshot to this viewport region (pixels).'),
+      schedule: z
+        .object({
+          durationMs: z.number().int().min(100).max(60_000),
+          intervalMs: z.number().int().min(50).max(5_000),
+        })
+        .optional()
+        .describe('Time-windowed capture: durationMs total, intervalMs between frames.'),
+      refs: z
+        .array(z.number().int().min(0))
+        .max(20)
+        .optional()
+        .describe('Indices from a previous schedule run whose images you want to view.'),
+    })
+    .strict(),
+  execute: async (opts) => {
+    return smartScreenshot(opts as Parameters<typeof smartScreenshot>[0]);
   },
-  // AI SDK v4: convert the dataURL result into a multi-modal content array
-  // so the model actually sees the image. The text caption helps the model
-  // know what it's looking at.
-  experimental_toToolResultContent: (output) => [
-    {
-      type: 'text',
-      text: `Screenshot captured (${output.width}x${output.height}px).`,
-    },
-    {
-      type: 'image',
-      data: output.dataUrl,
-      mimeType: 'image/png',
-    },
-  ],
+  // Convert the result to model-readable content. The 'schedule' and 'refs'
+  // variants return metadata, so we just text-format them.
+  experimental_toToolResultContent: (output) => {
+    const o = output as Awaited<ReturnType<typeof smartScreenshot>>;
+    if (o.kind === 'schedule') {
+      return [
+        {
+          type: 'text',
+          text: `Captured ${o.totalFrames} frame(s) over ${o.totalDurationMs}ms (no images sent). ` +
+            `Changes vs frame 0:\n` +
+            o.frames
+              .map(
+                (f) =>
+                  `  [${f.index}] t=${f.timestamp}ms changed=${f.changeFromBaseline}px ` +
+                  `(${(f.changedFraction * 100).toFixed(2)}%)` +
+                  (f.bbox ? ` bbox=(${f.bbox.x},${f.bbox.y},${f.bbox.width}x${f.bbox.height})` : ' no-change'),
+              )
+              .join('\n') +
+            `\n\nCall \`screenshot({ refs: [...] })\` to view specific frames.`,
+        },
+      ];
+    }
+    if (o.kind === 'refs') {
+      if (o.frames.length === 0) {
+        return [{ type: 'text', text: 'No frames at those indices (schedule may not have run).' }];
+      }
+      const cap = o.frames[0];
+      return [
+        {
+          type: 'text',
+          text: `Frame(s) ${o.frames.map((f) => f.index).join(', ')} from the most recent schedule (${cap?.width ?? 0}x${cap?.height ?? 0}px).`,
+        },
+        ...o.frames.map((f) => ({
+          type: 'image' as const,
+          data: f.dataUrl,
+          mimeType: 'image/png',
+        })),
+      ];
+    }
+    // 'single' and 'region'
+    const w = 'width' in o ? o.width : 0;
+    const h = 'height' in o ? o.height : 0;
+    return [
+      {
+        type: 'text',
+        text: `Screenshot captured (${w}x${h}px${o.kind === 'region' ? `, region (${o.region.x},${o.region.y},${o.region.width}x${o.region.height})` : ''}).`,
+      },
+      { type: 'image', data: o.dataUrl, mimeType: 'image/png' },
+    ];
+  },
 });
 
 // ---------- Tab management ----------
@@ -266,13 +324,30 @@ function keyCodeFor(key: string): number {
   }
 }
 
+// Re-export a11y + focus tools so the agent can use them.
+export { a11yTree, focused } from '@/lib/a11y-tree';
+export { a11yClick, a11yType, a11yPressKey } from '@/lib/a11y-actions';
+export { focusNext, focusPrevious } from '@/lib/focus-nav';
+
 export const allTools = {
-  domQuery,
-  domClick,
-  domType,
+  // PRIMARY: a11y-first
+  a11yTree,
+  focused,
+  a11yClick,
+  a11yType,
+  a11yPressKey,
+  focusNext,
+  focusPrevious,
+  // Smart screenshot (schedule/region/refs)
   screenshot,
-  pressKey,
+  // Tab management
   tabsList,
   tabsSwitch,
   tabsOpen,
+  // ESCAPE HATCH: low-level DOM tools. Use only when a11y tree is
+  // unavailable or the user asks for a specific selector.
+  domQuery,
+  domClick,
+  domType,
+  pressKey,
 };

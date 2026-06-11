@@ -11,6 +11,7 @@ import { ChatThread } from './components/ChatThread';
 import { InputBar } from './components/InputBar';
 import { ModelBadge } from './components/ModelBadge';
 import { Sidebar } from './components/Sidebar';
+import { installSmartScreenshotHandler } from './smart-screenshot';
 
 export default function App() {
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -85,6 +86,12 @@ export default function App() {
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
+  }, []);
+
+  // Side panel hosts the smart-screenshot bridge (Canvas + ImageBitmap).
+  useEffect(() => {
+    const cleanup = installSmartScreenshotHandler();
+    return cleanup;
   }, []);
 
   function safeJson(s: string): Record<string, unknown> {

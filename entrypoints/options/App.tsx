@@ -254,14 +254,14 @@ function ConfigForm() {
 
 function ConfigRow({ config }: { config: import('@/types').ModelConfig }) {
   return (
-    <Card>
+    <Card className={config.isDefault ? 'border-primary/50 bg-primary/5' : ''}>
       <CardContent className="flex items-center justify-between p-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium">{config.name}</span>
             {config.isDefault && (
-              <Badge variant="secondary" className="text-[10px]">
-                <Star className="mr-1 h-3 w-3" /> default
+              <Badge variant="default" className="text-[10px]">
+                <Star className="mr-1 h-3 w-3" /> active
               </Badge>
             )}
           </div>

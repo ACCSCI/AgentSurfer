@@ -178,6 +178,8 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   const assistantMessageId = newId();
   let stepCounter = 0;
   const startMs = Date.now();
+  let runReasoning = '';
+  let runText = '';
 
   // Filter tools based on enabled config.
   const enabledNames = await getEnabledToolNames();
@@ -202,6 +204,7 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
       switch (type) {
         case 'text-delta': {
           const t = (chunk as { textDelta: string }).textDelta;
+          runText += t;
           console.log('[AgentSurfer][chunk] text:', JSON.stringify(t));
           break;
         }
@@ -237,7 +240,10 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
         case 'reasoning-delta': {
           const r = (chunk as { textDelta?: string; text?: string });
           const text = r.textDelta ?? r.text ?? '';
-          if (text) console.log('[AgentSurfer][chunk] reasoning:', JSON.stringify(text));
+          if (text) {
+            runReasoning += text;
+            console.log('[AgentSurfer][chunk] reasoning:', JSON.stringify(text));
+          }
           break;
         }
         case 'error': {
@@ -333,11 +339,21 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   //    call `consumeStream()` to actually drain it and fire onChunk /
   //    onStepFinish callbacks.
   await result.consumeStream();
-  const finalText = await result.text;
+  const finalText = (await result.text).trim();
+
+  // Persist both reasoning and text to Dexie so old messages show the
+  // full thinking process even after a new run starts.
+  const displayParts: Array<{ type: string; text?: string; reasoning?: string }> = [];
+  if (runReasoning) {
+    displayParts.push({ type: 'reasoning', reasoning: runReasoning });
+  }
+  if (finalText) {
+    displayParts.push({ type: 'text', text: finalText });
+  }
   await appendMessage({
     sessionId: input.sessionId,
     role: 'assistant',
-    parts: [{ type: 'text', text: finalText }],
+    parts: displayParts as any,
   });
 }
 

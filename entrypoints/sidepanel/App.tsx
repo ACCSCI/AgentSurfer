@@ -44,7 +44,11 @@ export default function App() {
   }, [settingsReady, hydrate]);
 
   useEffect(() => {
-    if (currentSessionId) return;
+    if (currentSessionId) {
+      // Session changed → reset agent state (clear errors, live text, etc.)
+      resetAgent();
+      return;
+    }
     if (mostRecentSession) setCurrent(mostRecentSession.id);
     else startNewSession();
   }, [currentSessionId, mostRecentSession, setCurrent, startNewSession]);

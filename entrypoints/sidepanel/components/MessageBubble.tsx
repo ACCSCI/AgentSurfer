@@ -25,6 +25,12 @@ export function MessageBubble({
     .filter((p) => p.type === 'text')
     .map((p) => p.text ?? '')
     .join('\n');
+  // Extract reasoning from Dexie parts (persisted from previous runs).
+  const baseReasoning = message.parts
+    .filter((p): p is { type: string; reasoning: string } => p.type === 'reasoning' && typeof p.reasoning === 'string')
+    .map((p) => p.reasoning)
+    .join('\n');
+  const reasoning = liveReasoning || baseReasoning;
   const text = liveText || baseText;
 
   return (
@@ -38,9 +44,9 @@ export function MessageBubble({
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
       <div className="min-w-0 flex-1 space-y-1">
-        {liveReasoning && (
+        {reasoning && (
           <div className="rounded-lg border border-dashed border-muted-foreground/30 bg-muted/30 px-3 py-2 text-xs italic text-muted-foreground whitespace-pre-wrap break-words">
-            💭 {liveReasoning}
+            💭 {reasoning}
           </div>
         )}
         {text && (

@@ -6,8 +6,6 @@ export default defineConfig({
   srcDir: '.',
   outDir: '.output',
 
-  // The manifest is fully type-safe.
-  // https://wxt.dev/guide/manifest.html
   manifest: () => ({
     name: 'AgentSurfer',
     short_name: 'AgentSurfer',
@@ -25,9 +23,6 @@ export default defineConfig({
       '48': 'icon/48.png',
       '128': 'icon/128.png',
     },
-    // MV3 requires every file the extension loads (side panel HTML/JS/CSS
-    // chunks) to be explicitly web-accessible, or the side panel will
-    // 404 on its own assets and Chrome will mark the SW "Invalid".
     web_accessible_resources: [
       {
         resources: [
@@ -46,6 +41,9 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
 
   vite: () => ({
+    build: {
+      sourcemap: true,
+    },
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./', import.meta.url)),

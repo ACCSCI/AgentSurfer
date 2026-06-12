@@ -3,11 +3,14 @@
 // always chrome.storage or Dexie.
 
 import { runAgent } from '@/lib/agent';
-import { db, getActiveConfig, setActiveConfig, upsertConfig } from '@/lib/db';
+import { db, getActiveConfig, initToolConfigs, setActiveConfig, upsertConfig } from '@/lib/db';
 import type { ModelConfig } from '@/types';
 import type { StepUpdate } from '@/types/messages';
 
 export default defineBackground(() => {
+  // Initialize tool configs with defaults on first load.
+  initToolConfigs().catch(() => {});
+
   // Open side panel when the user clicks the action icon.
   // chrome.action.onClicked ONLY fires when there is no default_popup.
   chrome.action.onClicked.addListener(async (tab) => {

@@ -196,17 +196,20 @@ export async function setActiveConfig(id: string): Promise<void> {
 
 import { ALL_TOOLS, type ToolName } from '@/types';
 
-/** Get all tool configs, initializing defaults if table is empty. */
+/** Initialize tool configs with defaults if table is empty. Call once at startup. */
+export async function initToolConfigs(): Promise<void> {
+  const existing = await db.toolConfigs.toArray();
+  if (existing.length >= ALL_TOOLS.length) return;
+  const defaults: ToolConfig[] = ALL_TOOLS.map((name) => ({ name, enabled: true }));
+  await db.toolConfigs.bulkPut(defaults);
+}
+
+/** Read tool configs. Safe to use inside liveQuery (read-only). */
 export async function getToolConfigs(): Promise<ToolConfig[]> {
   const existing = await db.toolConfigs.toArray();
-  if (existing.length === ALL_TOOLS.length) return existing;
-  // Initialize: all tools enabled by default.
-  const defaults: ToolConfig[] = ALL_TOOLS.map((name) => ({
-    name,
-    enabled: true,
-  }));
-  await db.toolConfigs.bulkPut(defaults);
-  return defaults;
+  if (existing.length > 0) return existing;
+  // Not initialized yet — return defaults without writing.
+  return ALL_TOOLS.map((name) => ({ name, enabled: true }));
 }
 
 /** Get a set of enabled tool names for quick lookup. */

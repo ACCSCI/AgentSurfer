@@ -25,6 +25,15 @@ export default defineConfig({
       '48': 'icon/48.png',
       '128': 'icon/128.png',
     },
+    // MV3 requires every file the extension loads (side panel HTML/JS/CSS
+    // chunks) to be explicitly web-accessible, or the side panel will
+    // 404 on its own assets and Chrome will mark the SW "Invalid".
+    web_accessible_resources: [
+      {
+        resources: ['sidepanel.html', 'options.html', 'icon/*', 'content-scripts/*'],
+        matches: ['<all_urls>'],
+      },
+    ],
   }),
 
   modules: ['@wxt-dev/module-react'],

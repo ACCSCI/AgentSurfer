@@ -184,9 +184,12 @@ export class CDPService {
     await this.send('Overlay.highlightQuad', {
       quad,
       highlightConfig: {
-        fillColor: 'rgba(255, 0, 0, 0.6)',
-        borderColor: 'rgba(255, 0, 0, 1)',
-        borderWidth: 2,
+        padding: 4,
+        borderColor: { r: 255, g: 0, b: 0, a: 1 },
+        borderColorHighlight: { r: 255, g: 0, b: 0, a: 1 },
+        fillColor: { r: 255, g: 0, b: 0, a: 0.5 },
+        fillHighlight: { r: 255, g: 0, b: 0, a: 0.75 },
+        borderWidth: 3,
       },
     });
     this.highlightVisible = true;

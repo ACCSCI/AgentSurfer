@@ -174,7 +174,11 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
       return { role: 'assistant', content: text };
     });
 
-  // 3. Spin up the stream.
+  // 3. Wait briefly so the side panel's onMessage listener is registered
+  // before we start broadcasting chunks.
+  await new Promise((r) => setTimeout(r, 100));
+
+  // 4. Spin up the stream.
   console.log('[AgentSurfer] creating model for', input.config.provider, input.config.modelId);
   const model = await createModel(input.config);
   console.log('[AgentSurfer] model created, calling streamText');

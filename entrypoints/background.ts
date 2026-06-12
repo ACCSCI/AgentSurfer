@@ -77,7 +77,9 @@ async function handleMessage(
 
       // Fan-out helper: send a step update to any open extension page.
       const broadcast = (msg: unknown) => {
-        chrome.runtime.sendMessage(msg).catch(() => {});
+        try {
+          chrome.runtime.sendMessage(msg, () => {});
+        } catch {}
       };
       const log = (...args: unknown[]) => {
         const line = `[SW ${runId}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`;

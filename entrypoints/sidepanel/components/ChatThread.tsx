@@ -6,23 +6,28 @@ import { useAgentStore } from '@/stores';
 import { MessageBubble } from './MessageBubble';
 
 export function ChatThread({ sessionId }: { sessionId: string }) {
-  // Refetch the message list whenever the session changes or any message is
-  // added/updated/removed in the DB.
+  // Query 1: messages for this session — re-runs when any message row changes.
   const messages = useLiveQuery(
     () => getMessagesBySession(sessionId),
     [sessionId],
     [],
   );
 
-  const stepsByMessage = useLiveQuery(
+  // Query 2: steps for each message — keyed on session ID so it re-runs
+  // when steps are added to Dexie (not just when messages change).
+  const allStepsForSession = useLiveQuery(
     async () => {
+      if (!messages || messages.length === 0) return new Map();
       const map = new Map<string, Awaited<ReturnType<typeof getStepsForMessage>>>();
       for (const m of messages) {
         map.set(m.id, await getStepsForMessage(m.id));
       }
       return map;
     },
-    [messages],
+    // Key on sessionId — this makes the query re-run whenever
+    // the session changes. The nested getStepsForMessage also queries
+    // the agentSteps table, which liveQuery watches.
+    [sessionId],
     new Map(),
   );
 
@@ -32,27 +37,12 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
   const error = useAgentStore((s) => s.error);
   const isRunning = useAgentStore((s) => s.isRunning);
 
-  // Helper for the live tool-call chips at the bottom of the chat.
-  function summarizeArgs(args: Record<string, unknown>): string {
-    const keys = Object.keys(args);
-    if (keys.length === 0) return '';
-    const preview = keys
-      .slice(0, 2)
-      .map((k) => `${k}=${shortVal(args[k])}`)
-      .join(', ');
-    return keys.length > 2 ? `${preview}, +${keys.length - 2}` : preview;
-  }
-  function shortVal(v: unknown): string {
-    const s = typeof v === 'string' ? v : JSON.stringify(v);
-    return s.length > 40 ? `${s.slice(0, 40)}…` : s;
-  }
-
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, currentStep?.stepNumber, error]);
+  }, [messages?.length, currentStep?.stepNumber, error]);
 
-  if (messages.length === 0 && !isRunning && !error) {
+  if ((!messages || messages.length === 0) && !isRunning && !error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted-foreground">
         <p>Ask the agent to do something on the active tab.</p>
@@ -65,19 +55,19 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-3 p-4">
-      {messages.map((m) => (
+      {(messages ?? []).map((m) => (
         <MessageBubble
           key={m.id}
           message={m}
-          steps={stepsByMessage.get(m.id) ?? []}
+          steps={allStepsForSession.get(m.id) ?? []}
           isLive={currentStep?.stepNumber != null && m.role === 'assistant'}
-          liveText={m.role === 'assistant' && m === messages[messages.length - 1] ? accumulatedText : ''}
+          liveText={m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? accumulatedText : ''}
           liveToolCalls={
-            m.role === 'assistant' && m === messages[messages.length - 1] ? liveToolCalls : []
+            m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? liveToolCalls : []
           }
         />
       ))}
-      {isRunning && messages.length > 0 && messages[messages.length - 1]?.role === 'user' && (
+      {isRunning && (messages ?? []).length > 0 && (messages ?? [])[(messages ?? []).length - 1]?.role === 'user' && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
           Agent is running…
@@ -92,7 +82,9 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
             >
               <span className="text-primary">→</span> {tc.name}
               {Object.keys(tc.args).length > 0 && (
-                <span className="ml-1 text-muted-foreground">({summarizeArgs(tc.args)})</span>
+                <span className="ml-1 text-muted-foreground">
+                  ({Object.keys(tc.args).slice(0, 2).map((k) => `${k}=${typeof tc.args[k] === 'string' ? (tc.args[k] as string).slice(0, 30) : '…'}`).join(', ')})
+                </span>
               )}
             </div>
           ))}
@@ -108,5 +100,3 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
     </div>
   );
 }
-
-void db; // silence unused if not referenced here

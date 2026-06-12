@@ -340,12 +340,18 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   //    AI SDK v4: `result.text` is a getter; the stream is lazy. We must
   //    call `consumeStream()` to actually drain it and fire onChunk /
   //    onStepFinish callbacks.
-  await result.consumeStream();
+  try {
+    await result.consumeStream();
+  } catch (err) {
+    console.error('[AgentSurfer] consumeStream error:', err);
+  }
   const finalText = (await result.text).trim();
 
   // Persist both reasoning and text to Dexie so old messages show the
   // full thinking process even after a new run starts.
-  const displayParts: Array<{ type: string; text?: string; reasoning?: string }> = [];
+  // We store reasoning in a `type: 'reasoning'` part — Zod will accept
+  // the 'reasoning' type from the MessagePartSchema.
+  const displayParts: Array<Record<string, unknown>> = [];
   if (runReasoning) {
     displayParts.push({ type: 'reasoning', reasoning: runReasoning });
   }

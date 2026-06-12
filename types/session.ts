@@ -24,7 +24,7 @@ export type MessageRole = z.infer<typeof MessageRoleSchema>;
 // ModelMessage when invoking the LLM. Persisted screenshots are referenced by
 // id and resolved at runtime.
 export const MessagePartSchema = z.object({
-  type: z.enum(['text', 'image', 'tool-call', 'tool-result']),
+  type: z.enum(['text', 'image', 'tool-call', 'tool-result', 'reasoning']),
   text: z.string().optional(),
   imageRef: z.string().optional(), // ScreenshotMeta.id when type=image
   toolCall: z

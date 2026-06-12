@@ -85,7 +85,7 @@ async function captureSingleInSw(): Promise<SmartScreenshotResult> {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id || tab.windowId == null) throw new Error('No active tab');
   if (tab.url && !tab.url.startsWith('http')) {
-    throw new Error(`Cannot capture non-http URL: ${tab.url}`);
+    return { error: `Cannot capture non-http URL (${tab.url}). Switch to an HTTP tab first.` };
   }
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   return {

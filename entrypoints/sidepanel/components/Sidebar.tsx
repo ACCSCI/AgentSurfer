@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { MessageSquare, Plus, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, MessageSquare, Plus, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -8,6 +9,7 @@ import { db, deleteSession } from '@/lib/db';
 import { useSessionStore } from '@/stores';
 
 export function Sidebar() {
+  const [collapsed, setCollapsed] = useState(false);
   const sessions = useLiveQuery(
     () => db.sessions.orderBy('updatedAt').reverse().toArray(),
     [],
@@ -17,16 +19,50 @@ export function Sidebar() {
   const setCurrent = useSessionStore((s) => s.setCurrentSession);
   const startNew = useSessionStore((s) => s.startNewSession);
 
+  if (collapsed) {
+    return (
+      <aside className="flex w-9 shrink-0 flex-col items-center border-r bg-muted/30 py-2">
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7"
+          onClick={() => setCollapsed(false)}
+          title="Expand sidebar"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="mt-2 h-7 w-7"
+          onClick={() => startNew()}
+          title="New chat"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="flex w-56 shrink-0 flex-col border-r bg-muted/30">
-      <div className="p-2">
+      <div className="flex items-center justify-between p-2">
         <Button
           variant="default"
           size="sm"
-          className="w-full justify-start"
+          className="flex-1 justify-start"
           onClick={() => startNew()}
         >
           <Plus className="mr-1 h-3.5 w-3.5" /> New chat
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="ml-1 h-7 w-7 shrink-0"
+          onClick={() => setCollapsed(true)}
+          title="Collapse sidebar"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
         </Button>
       </div>
       <ScrollArea className="min-h-0 flex-1">

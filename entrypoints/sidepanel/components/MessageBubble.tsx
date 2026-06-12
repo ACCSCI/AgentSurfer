@@ -1,4 +1,5 @@
-import { Bot, User } from 'lucide-react';
+import { useState } from 'react';
+import { Bot, ChevronDown, ChevronRight, Image, Loader2, User } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import type { AgentStep, ChatMessage } from '@/types';
@@ -78,41 +79,191 @@ export function MessageBubble({
 }
 
 function StepRow({ step, isLatest }: { step: AgentStep; isLatest: boolean }) {
+  const [expanded, setExpanded] = useState(isLatest);
+  const hasContent = step.text || step.toolCalls.length > 0 || step.toolResults.length > 0;
+
+  if (!hasContent) return null;
+
   return (
     <div
       className={cn(
-        'rounded border border-dashed bg-background/50 p-2 text-xs',
-        isLatest && 'border-primary/50 bg-primary/5',
+        'rounded border bg-background/50 p-2 text-xs',
+        isLatest ? 'border-primary/50 bg-primary/5' : 'border-border',
       )}
     >
-      <div className="flex items-center gap-1 text-muted-foreground">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1 text-left"
+        onClick={() => setExpanded(!expanded)}
+      >
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        )}
         <Badge variant="outline" className="text-[10px]">
           step {step.stepNumber}
         </Badge>
         {step.usage && (
-          <span>
+          <span className="text-muted-foreground">
             {step.usage.promptTokens}+{step.usage.completionTokens} tok
           </span>
         )}
-        {step.durationMs > 0 && <span>{step.durationMs}ms</span>}
+        {step.durationMs > 0 && (
+          <span className="text-muted-foreground">{step.durationMs}ms</span>
+        )}
+        {step.toolCalls.length > 0 && (
+          <span className="text-muted-foreground">
+            {step.toolCalls.length} tool{step.toolCalls.length > 1 ? 's' : ''}
+          </span>
+        )}
+        {!expanded && step.text && (
+          <span className="ml-1 truncate text-muted-foreground">
+            — {step.text.slice(0, 60)}
+          </span>
+        )}
+      </button>
+
+      {expanded && (
+        <div className="mt-2 space-y-2 pl-4">
+          {step.text && (
+            <div className="whitespace-pre-wrap text-muted-foreground italic">
+              {step.text}
+            </div>
+          )}
+          {step.toolCalls.map((tc) => (
+            <ToolCallRow key={tc.id} name={tc.name} args={tc.args} />
+          ))}
+          {step.toolResults.map((tr) => (
+            <ToolResultRow
+              key={tr.toolCallId}
+              name={tr.name}
+              result={tr.result}
+              isError={tr.isError}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolCallRow({ name, args }: { name: string; args: Record<string, unknown> }) {
+  const keys = Object.keys(args);
+  return (
+    <div className="rounded bg-muted/50 p-2 font-mono text-[11px]">
+      <div className="flex items-center gap-1">
+        <span className="text-primary font-semibold">→</span>
+        <span className="font-semibold">{name}</span>
+        {keys.length > 0 && (
+          <span className="text-muted-foreground">({keys.length} arg{keys.length > 1 ? 's' : ''})</span>
+        )}
       </div>
-      {step.text && <p className="mt-1 whitespace-pre-wrap">{step.text}</p>}
-      {step.toolCalls.map((tc) => (
-        <div key={tc.id} className="mt-1 font-mono text-[11px]">
-          <span className="text-primary">→</span> {tc.name}
-          {Object.keys(tc.args).length > 0 && (
-            <span className="text-muted-foreground">({summarizeArgs(tc.args)})</span>
+      {keys.length > 0 && (
+        <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words text-muted-foreground">
+          {JSON.stringify(args, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function ToolResultRow({
+  name,
+  result,
+  isError,
+}: {
+  name: string;
+  result: unknown;
+  isError: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  if (result == null) return null;
+
+  // Screenshot result: show as image
+  const asObj = result as Record<string, unknown>;
+  if (asObj.dataUrl && typeof asObj.dataUrl === 'string' && name === 'screenshot') {
+    return (
+      <div className="rounded bg-muted/50 p-2">
+        <div className="flex items-center gap-1 text-[11px]">
+          <Image className="h-3 w-3" />
+          <span className={isError ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400'}>
+            {isError ? '✗' : '✓'}
+          </span>
+          <span className="font-semibold">{name}</span>
+          {asObj.width && asObj.height && (
+            <span className="text-muted-foreground">
+              {asObj.width}×{asObj.height}px
+            </span>
           )}
         </div>
-      ))}
-      {step.toolResults.map((tr) => (
-        <div key={tr.toolCallId} className="mt-0.5 font-mono text-[11px] text-muted-foreground">
-          <span className={tr.isError ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400'}>
-            {tr.isError ? '✗' : '✓'}
-          </span>{' '}
-          {tr.name} → {summarizeResult(tr.result)}
+        {!isError && (
+          <img
+            src={asObj.dataUrl as string}
+            alt={`Screenshot from ${name}`}
+            className="mt-2 max-h-64 rounded border object-contain"
+          />
+        )}
+      </div>
+    );
+  }
+
+  // Schedule result: show as metadata
+  if (asObj.kind === 'schedule' && Array.isArray(asObj.frames)) {
+    return (
+      <div className="rounded bg-muted/50 p-2">
+        <div className="flex items-center gap-1 text-[11px]">
+          <span className={isError ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400'}>
+            {isError ? '✗' : '✓'}
+          </span>
+          <span className="font-semibold">{name}</span>
+          <span className="text-muted-foreground">
+            schedule: {asObj.totalFrames} frames, {asObj.totalDurationMs}ms
+          </span>
         </div>
-      ))}
+        <div className="mt-1 space-y-0.5">
+          {(asObj.frames as Array<Record<string, unknown>>).slice(0, 10).map((f, i) => (
+            <div key={i} className="text-[10px] text-muted-foreground">
+              [{String(f.index)}] t={String(f.timestamp)}ms change={String(f.changeFromBaseline)}px
+              {f.bbox ? (
+                <span> bbox=({(f.bbox as Record<string, unknown>).x},{(f.bbox as Record<string, unknown>).y})</span>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Default: show as JSON (collapsible)
+  const str = JSON.stringify(result, null, 2);
+  const preview = str.length > 120 ? str.slice(0, 120) + '…' : str;
+
+  return (
+    <div className="rounded bg-muted/50 p-2">
+      <button
+        type="button"
+        className="flex items-center gap-1 text-[11px]"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className={isError ? 'text-destructive' : 'text-emerald-600 dark:text-emerald-400'}>
+          {isError ? '✗' : '✓'}
+        </span>
+        <span className="font-semibold">{name}</span>
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-muted-foreground" />
+        )}
+      </button>
+      {expanded ? (
+        <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words text-[10px] text-muted-foreground">
+          {str}
+        </pre>
+      ) : (
+        <div className="mt-0.5 text-[10px] text-muted-foreground">{preview}</div>
+      )}
     </div>
   );
 }
@@ -125,18 +276,6 @@ function summarizeArgs(args: Record<string, unknown>): string {
     .map((k) => `${k}=${shortVal(args[k])}`)
     .join(', ');
   return keys.length > 2 ? `${preview}, +${keys.length - 2}` : preview;
-}
-
-function summarizeResult(result: unknown): string {
-  if (result == null) return 'null';
-  if (typeof result === 'object') {
-    const r = result as { dataUrl?: unknown };
-    if (r.dataUrl && typeof r.dataUrl === 'string') return '<screenshot>';
-    const arr = Array.isArray(result) ? result : null;
-    if (arr) return `Array(${arr.length})`;
-    return '{…}';
-  }
-  return shortVal(result);
 }
 
 function shortVal(v: unknown): string {

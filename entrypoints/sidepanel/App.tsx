@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Loader2, Settings as SettingsIcon, Square, Wand2 } from 'lucide-react';
+import { Loader2, RefreshCw, Settings as SettingsIcon, Square, Wand2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -11,7 +11,6 @@ import { ChatThread } from './components/ChatThread';
 import { InputBar } from './components/InputBar';
 import { ModelBadge } from './components/ModelBadge';
 import { Sidebar } from './components/Sidebar';
-import { installSmartScreenshotHandler } from './smart-screenshot';
 
 export default function App() {
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -88,12 +87,6 @@ export default function App() {
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, []);
 
-  // Side panel hosts the smart-screenshot bridge (Canvas + ImageBitmap).
-  useEffect(() => {
-    const cleanup = installSmartScreenshotHandler();
-    return cleanup;
-  }, []);
-
   function safeJson(s: string): Record<string, unknown> {
     try {
       return JSON.parse(s);
@@ -150,6 +143,14 @@ export default function App() {
                 <Square className="mr-1 h-3 w-3 fill-current" /> Cancel
               </Button>
             )}
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => hydrate()}
+              title="Reload model config"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
             <Button size="icon" variant="ghost" onClick={openSettings} title="Settings">
               <SettingsIcon className="h-4 w-4" />
             </Button>

@@ -10,23 +10,22 @@ export const ProviderSchema = z.enum([
   'mimo',
   'MiniMax',
   'mock',
-  'chrome-prompt-api',
 ]);
 export type Provider = z.infer<typeof ProviderSchema>;
 
 export const ProviderMeta: Record<
   Provider,
-  { label: string; authHeader: 'bearer' | 'x-api-key' | 'api-key' | 'none'; needsBaseUrl: boolean; needsApiKey: boolean }
+  { label: string; authHeader: 'bearer' | 'x-api-key' | 'api-key' | 'none'; needsBaseUrl: boolean }
 > = {
-  openai: { label: 'OpenAI', authHeader: 'bearer', needsBaseUrl: false, needsApiKey: true },
-  anthropic: { label: 'Anthropic', authHeader: 'x-api-key', needsBaseUrl: false, needsApiKey: true },
-  'openai-compatible-1': { label: 'OpenAI Compatible #1', authHeader: 'bearer', needsBaseUrl: true, needsApiKey: true },
-  'openai-compatible-2': { label: 'OpenAI Compatible #2', authHeader: 'bearer', needsBaseUrl: true, needsApiKey: true },
-  mimo: { label: 'MiMo (Xiaomi)', authHeader: 'api-key', needsBaseUrl: false, needsApiKey: true },
-  MiniMax: { label: 'MiniMax', authHeader: 'bearer', needsBaseUrl: false, needsApiKey: true },
-  mock: { label: 'Mock (E2E / demo)', authHeader: 'none', needsBaseUrl: false, needsApiKey: false },
-  // Chrome Prompt API: Gemini Nano on-device, no API key, no network.
-  'chrome-prompt-api': { label: 'Chrome Prompt API (Gemini Nano)', authHeader: 'none', needsBaseUrl: false, needsApiKey: false },
+  openai: { label: 'OpenAI', authHeader: 'bearer', needsBaseUrl: false },
+  anthropic: { label: 'Anthropic', authHeader: 'x-api-key', needsBaseUrl: false },
+  'openai-compatible-1': { label: 'OpenAI Compatible #1', authHeader: 'bearer', needsBaseUrl: true },
+  'openai-compatible-2': { label: 'OpenAI Compatible #2', authHeader: 'bearer', needsBaseUrl: true },
+  mimo: { label: 'MiMo (Xiaomi)', authHeader: 'api-key', needsBaseUrl: false },
+  MiniMax: { label: 'MiniMax', authHeader: 'bearer', needsBaseUrl: false },
+  // `mock` is a scriptable in-process provider used by E2E tests. No auth,
+  // no real network call. The `modelId` encodes which script to run.
+  mock: { label: 'Mock (E2E / demo)', authHeader: 'none', needsBaseUrl: false },
 };
 
 // Default base URLs — users can override in the options page.
@@ -38,7 +37,6 @@ export const DefaultBaseUrl: Record<Provider, string | null> = {
   mimo: 'https://api.xiaomimimo.com/v1',
   MiniMax: 'https://api.minimaxi.com',
   mock: null,
-  'chrome-prompt-api': null,
 };
 
 // Default model IDs per provider (UI suggestions).
@@ -51,8 +49,8 @@ export const DefaultModelId: Record<Provider, string> = {
   // M2.7-highspeed is the project default per the user's request — fast,
   // stable, supported by the Anthropic-compat endpoint.
   MiniMax: 'MiniMax-M2.7-highspeed',
+  // `mock:happy` is the default scripted run used by E2E specs.
   mock: 'mock:happy',
-  'chrome-prompt-api': 'gemini-nano',
 };
 
 // ---------- ModelConfig ----------
@@ -78,7 +76,7 @@ export const ModelConfigSchema = z
         message: `${meta.label} requires a base URL`,
       });
     }
-    if (cfg.provider !== 'mock' && cfg.provider !== 'chrome-prompt-api' && cfg.apiKey.length === 0) {
+    if (cfg.provider !== 'mock' && cfg.apiKey.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['apiKey'],

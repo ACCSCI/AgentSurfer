@@ -199,12 +199,197 @@ export const tabsOpen = tool({
   },
 });
 
+export const pressKey = tool({
+  description:
+    'Send a keyboard event to the currently focused element. Use after domType to submit forms (Enter) or trigger shortcuts. Supports: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete.',
+  parameters: z.object({
+    key: z
+      .enum(['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete'])
+      .describe('The key to press.'),
+  }),
+  execute: async ({ key }) => {
+    return runOnActiveTab(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body) {
+        return { ok: false, error: 'No focused element. Click an input first.' };
+      }
+      const eventInit = {
+        key,
+        code: key,
+        keyCode: keyCodeFor(key),
+        which: keyCodeFor(key),
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      } as KeyboardEventInit;
+      el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+      if (key === 'Enter') {
+        const form = el.closest('form');
+        if (form) {
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+          } else {
+            form.submit();
+          }
+        }
+      }
+      el.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+      el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+      return { ok: true, key };
+    });
+  },
+});
+
+function keyCodeFor(key: string): number {
+  switch (key) {
+    case 'Enter': return 13;
+    case 'Tab': return 9;
+    case 'Escape': return 27;
+    case 'ArrowUp': return 38;
+    case 'ArrowDown': return 40;
+    case 'ArrowLeft': return 37;
+    case 'ArrowRight': return 39;
+    case 'Backspace': return 8;
+    case 'Delete': return 46;
+    default: return 0;
+  }
+}
+
+// ---------- Focus navigation ----------
+
+interface FocusStep {
+  step: number;
+  direction: 'next' | 'previous';
+  element: { tag: string; name: string; role: string; bbox?: { x: number; y: number; width: number; height: number } } | null;
+}
+
+const MAX_TABS = 5;
+
+export const focusNext = tool({
+  description:
+    'Press Tab one or more times to move keyboard focus forward. After each Tab, returns the accessible name and role of the focused element. Use when DOM is obfuscated (Google, Meta) and domQuery fails. The focus ring is a reliable visual marker.',
+  parameters: z.object({
+    count: z.number().int().min(1).max(MAX_TABS).default(1),
+  }),
+  execute: async ({ count }) => {
+    const steps: FocusStep[] = [];
+    for (let i = 0; i < count; i++) {
+      const step = await runOnActiveTab(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Tab', code: 'Tab', keyCode: 9, which: 9, bubbles: true, cancelable: true,
+        }));
+        const el = document.activeElement;
+        if (!el || el === document.body) return { step: i + 1, direction: 'next' as const, element: null };
+        const name = el.getAttribute('aria-label') ?? (el.textContent ?? '').trim().slice(0, 80) ?? '';
+        const role = el.getAttribute('role') ?? el.tagName.toLowerCase();
+        const rect = el.getBoundingClientRect();
+        const bbox = rect.width > 0 && rect.height > 0
+          ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
+          : undefined;
+        return { step: i + 1, direction: 'next' as const, element: { tag: el.tagName.toLowerCase(), name, role, bbox } };
+      });
+      steps.push(step as FocusStep);
+    }
+    return { pressed: count, steps };
+  },
+});
+
+export const focusPrevious = tool({
+  description:
+    'Press Shift+Tab to move focus backward. Same as focusNext but reverse direction.',
+  parameters: z.object({
+    count: z.number().int().min(1).max(MAX_TABS).default(1),
+  }),
+  execute: async ({ count }) => {
+    const steps: FocusStep[] = [];
+    for (let i = 0; i < count; i++) {
+      const step = await runOnActiveTab(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Tab', code: 'Tab', keyCode: 9, which: 9, shiftKey: true, bubbles: true, cancelable: true,
+        }));
+        const el = document.activeElement;
+        if (!el || el === document.body) return { step: i + 1, direction: 'previous' as const, element: null };
+        const name = el.getAttribute('aria-label') ?? (el.textContent ?? '').trim().slice(0, 80) ?? '';
+        const role = el.getAttribute('role') ?? el.tagName.toLowerCase();
+        const rect = el.getBoundingClientRect();
+        const bbox = rect.width > 0 && rect.height > 0
+          ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
+          : undefined;
+        return { step: i + 1, direction: 'previous' as const, element: { tag: el.tagName.toLowerCase(), name, role, bbox } };
+      });
+      steps.push(step as FocusStep);
+    }
+    return { pressed: count, steps };
+  },
+});
+
+// ---------- Smart screenshot ----------
+
+export const smartScreenshot = tool({
+  description:
+    `Smart screenshot of the active tab's visible viewport. Multiple modes:
+- no args: single full-page shot.
+- { region: {x,y,width,height} }: crop to a region.
+- { schedule: {durationMs, intervalMs} }: capture N frames over time, return ONLY metadata (index, timestamp, changeFromBaseline, bbox) — NO images.
+- { refs: [0, 5, 7] }: fetch specific frames from the most recent schedule run.
+
+Use schedule mode to detect page load completion or animation without paying image-token cost.`,
+  parameters: z
+    .object({
+      region: z.object({
+        x: z.number().int().min(0),
+        y: z.number().int().min(0),
+        width: z.number().int().min(1).max(8000),
+        height: z.number().int().min(1).max(8000),
+      }).optional().describe('Crop to this viewport region.'),
+      schedule: z.object({
+        durationMs: z.number().int().min(100).max(60_000),
+        intervalMs: z.number().int().min(50).max(5_000),
+      }).optional().describe('Time-windowed capture.'),
+      refs: z.array(z.number().int().min(0)).max(20).optional()
+        .describe('Indices from a previous schedule whose images you want.'),
+    })
+    .strict(),
+  execute: async (opts) => {
+    const o = opts as Record<string, unknown>;
+    // Route to side panel for schedule/region/refs, or do single shot in SW.
+    if (!o.region && !o.schedule && !o.refs) {
+      // Single full shot — do it in the SW directly.
+      const tab = await getActiveTab();
+      if (!tab.url || !tab.url.startsWith('http')) {
+        return { error: `Cannot capture non-http URL (${tab.url || 'empty'}). Switch to an HTTP tab first.` };
+      }
+      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      return { kind: 'single', dataUrl, width: tab.width ?? 0, height: tab.height ?? 0, timestamp: Date.now() };
+    }
+    // Delegate to the side panel for schedule/region/refs (needs Canvas/ImageBitmap).
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: '__smart-screenshot:execute',
+        options: o,
+      });
+      if (res?.ok) return res.data;
+    } catch {
+      // Fall through to error.
+    }
+    return { error: 'Smart screenshot: side panel not available or unresponsive.' };
+  },
+});
+
 export const allTools = {
-  domQuery,
-  domClick,
-  domType,
+  // Focus navigation (Tab key traversal).
+  focusNext,
+  focusPrevious,
+  // Smart screenshot
+  smartScreenshot,
   screenshot,
+  // Tab management
   tabsList,
   tabsSwitch,
   tabsOpen,
+  // DOM tools
+  domQuery,
+  domClick,
+  domType,
+  pressKey,
 };

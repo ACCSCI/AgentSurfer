@@ -199,6 +199,18 @@ export const tabsOpen = tool({
   },
 });
 
+export const tabsClose = tool({
+  description:
+    'Close one or more tabs by their IDs. Use to clean up tabs opened during the task.',
+  parameters: z.object({
+    tabIds: z.array(z.number().int()).describe('Array of tab IDs to close'),
+  }),
+  execute: async ({ tabIds }) => {
+    await chrome.tabs.remove(tabIds);
+    return { ok: true, closed: tabIds.length };
+  },
+});
+
 export const pressKey = tool({
   description:
     'Send a keyboard event to the currently focused element. Use after domType to submit forms (Enter) or trigger shortcuts. Supports: Enter, Tab, Escape, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Backspace, Delete.',
@@ -547,6 +559,7 @@ export const allTools = {
   tabsList,
   tabsSwitch,
   tabsOpen,
+  tabsClose,
   // DOM tools (escape hatch — use CDP tools first).
   domQuery,
   domClick,

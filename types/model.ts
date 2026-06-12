@@ -71,6 +71,7 @@ export const ALL_TOOLS = [
   'tabsList',
   'tabsSwitch',
   'tabsOpen',
+  'tabsClose',
   'domQuery',
   'domClick',
   'domType',

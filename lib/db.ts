@@ -201,7 +201,7 @@ const DEFAULT_ENABLED = new Set([
   'cdpAim', 'cdpConfirm', 'cdpScroll', 'cdpCancel',
   'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
   'smartScreenshot',
-  'tabsList', 'tabsSwitch', 'tabsOpen',
+  'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
 ]);
 
 /** Initialize tool configs with defaults if table is empty. Call once at startup. */

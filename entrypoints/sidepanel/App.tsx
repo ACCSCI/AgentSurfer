@@ -83,17 +83,21 @@ export default function App() {
         if (c.type === 'text-delta' && typeof c.textDelta === 'string') {
           appendTextRef.current(c.textDelta);
         } else if (c.type === 'reasoning' || c.type === 'reasoning-delta') {
-          const text = ((c as { textDelta?: string; text?: string }).textDelta ?? (c as { text?: string }).text ?? '');
+          const text =
+            ((c as { textDelta?: string }).textDelta ?? '') ||
+            ((c as { text?: string }).text ?? '');
           if (text) appendReasoningRef.current(text);
         } else if (c.type === 'tool-call' && c.toolCallId && c.toolName) {
           addTcRef.current({
             id: c.toolCallId as string,
             name: c.toolName as string,
-            args: (typeof c.args === 'string' ? safeJson(c.args) : (c.args as Record<string, unknown>)) ?? {},
+            args:
+              (typeof c.args === 'string'
+                ? safeJson(c.args)
+                : (c.args as Record<string, unknown>)) ?? {},
           });
         }
       } else if (message.type === '__sw:log') {
-        // eslint-disable-next-line no-console
         console.log((message as { line: string }).line);
       }
     };

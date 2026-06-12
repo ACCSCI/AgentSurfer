@@ -65,13 +65,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setStep: (step) =>
     set({
       currentStep: step,
-      // Step completed → tool calls are now persisted to Dexie.
-      // Clear only the live tool call buffer; accumulatedText stays.
-      liveToolCalls: [],
+      // Keep liveToolCalls — they're still visible until the NEXT step's
+      // first chunk arrives (appendText or addStreamingToolCall clears them).
+      // This prevents the flash where tool calls vanish between steps.
     }),
 
   appendText: (text) =>
-    set((s) => ({ accumulatedText: s.accumulatedText + text })),
+    set((s) => ({
+      accumulatedText: s.accumulatedText + text,
+      // New text arriving = new step started. Clear old live tool calls.
+      liveToolCalls: [],
+    })),
 
   addStreamingToolCall: (tc) =>
     set((s) => ({ liveToolCalls: [...s.liveToolCalls, tc] })),
@@ -85,6 +89,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       abortController: null,
       currentStep: null,
       liveToolCalls: [],
+      // Keep accumulatedText — the user should see the full run, not
+      // just the final summary. Cleared only on reset() (new session).
     }),
 
   fail: (message) =>

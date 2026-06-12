@@ -23,7 +23,11 @@ export function MessageBubble({
     .filter((p) => p.type === 'text')
     .map((p) => p.text ?? '')
     .join('\n');
-  const text = isLive && liveText ? baseText + liveText : baseText;
+  // During the run: show accumulated live text.
+  // After the run: show accumulated text (if non-empty) so the full
+  // thinking process is preserved. Only fall back to the Dexie message
+  // text if accumulatedText is empty (e.g. very old messages).
+  const text = liveText || baseText;
 
   return (
     <div className={cn('flex gap-2', isUser ? 'flex-row-reverse' : 'flex-row')} data-testid="message-bubble">
@@ -46,7 +50,7 @@ export function MessageBubble({
             )}
           >
             {text}
-            {isLive && liveText && (
+            {isLive && (
               <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-current align-middle" />
             )}
           </div>

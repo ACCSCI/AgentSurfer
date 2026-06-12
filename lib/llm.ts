@@ -4,6 +4,7 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModelV1 } from 'ai';
+import { createChromePromptApiModel } from '@/lib/chrome-prompt-api';
 import type { ModelConfig, Provider } from '@/types';
 
 // NOTE: as of writing (Jun 2026), @ai-sdk/openai-compatible@1.0.39 bundles
@@ -37,6 +38,7 @@ export const KnownModels: Record<Provider, readonly string[]> = {
     'MiniMax-M2',
   ],
   mock: ['mock:happy', 'mock:oneTool', 'mock:textOnly', 'mock:clickSequence', 'mock:failsAtStep3'],
+  'chrome-prompt-api': ['gemini-nano'],
 };
 
 export function listModels(provider: Provider): readonly string[] {
@@ -109,6 +111,12 @@ async function createModelInternal(config: ModelConfig): Promise<AnyLanguageMode
       // See lib/mock-scripts.ts for available scripts.
       const { createMockModel } = await import('@/lib/mock-scripts');
       return createMockModel(config.modelId);
+    }
+
+    case 'chrome-prompt-api': {
+      // Chrome's built-in Prompt API — uses Gemini Nano on-device.
+      // No API key needed. Works in Chrome 133+ (SW context).
+      return createChromePromptApiModel(config.modelId);
     }
 
     default: {

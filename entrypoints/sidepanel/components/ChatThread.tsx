@@ -27,8 +27,8 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
   );
 
   const currentStep = useAgentStore((s) => s.currentStep);
-  const currentText = useAgentStore((s) => s.currentText);
-  const currentToolCalls = useAgentStore((s) => s.currentToolCalls);
+  const accumulatedText = useAgentStore((s) => s.accumulatedText);
+  const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
   const error = useAgentStore((s) => s.error);
   const isRunning = useAgentStore((s) => s.isRunning);
 
@@ -71,9 +71,9 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
           message={m}
           steps={stepsByMessage.get(m.id) ?? []}
           isLive={currentStep?.stepNumber != null && m.role === 'assistant'}
-          liveText={m.role === 'assistant' && m === messages[messages.length - 1] ? currentText : ''}
+          liveText={m.role === 'assistant' && m === messages[messages.length - 1] ? accumulatedText : ''}
           liveToolCalls={
-            m.role === 'assistant' && m === messages[messages.length - 1] ? currentToolCalls : []
+            m.role === 'assistant' && m === messages[messages.length - 1] ? liveToolCalls : []
           }
         />
       ))}
@@ -83,9 +83,9 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
           Agent is running…
         </div>
       )}
-      {isRunning && currentToolCalls.length > 0 && (
+      {isRunning && liveToolCalls.length > 0 && (
         <div className="space-y-1">
-          {currentToolCalls.map((tc) => (
+          {liveToolCalls.map((tc) => (
             <div
               key={tc.id}
               className="rounded border border-dashed border-primary/50 bg-primary/5 p-2 font-mono text-[11px]"

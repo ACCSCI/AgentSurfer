@@ -79,7 +79,10 @@ export function MessageBubble({
 }
 
 function StepRow({ step, isLatest }: { step: AgentStep; isLatest: boolean }) {
-  const [expanded, setExpanded] = useState(isLatest);
+  // Auto-expand if the step has text (the model's thinking/narration) or
+  // if it's the latest step. Only collapse steps that are purely tool
+  // calls with no text.
+  const [expanded, setExpanded] = useState(isLatest || !!step.text);
   const hasContent = step.text || step.toolCalls.length > 0 || step.toolResults.length > 0;
 
   if (!hasContent) return null;

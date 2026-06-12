@@ -10,11 +10,13 @@ interface AgentState {
   runId: string | null;
   isRunning: boolean;
   currentStep: StepUpdate | null;
-  // Live, streaming deltas from the model (text + tool call deltas).
-  // Reset at the start of each step; appended to as onChunk fires.
-  currentText: string;
-  currentToolCalls: ToolCall[];
-  // Per-step live result count, so the UI can show "running tool X" badges.
+  // Accumulated streaming text across the ENTIRE run (not per-step).
+  // Only cleared on start/reset/finish. This prevents the "flash and disappear"
+  // when a step completes and the live section resets.
+  accumulatedText: string;
+  // Tool calls from the current in-progress step (before onStepFinish).
+  // Cleared on setStep (step completed → tool calls are now in Dexie).
+  liveToolCalls: ToolCall[];
   runningTools: Record<string, 'pending' | 'ok' | 'error'>;
   abortController: AbortController | null;
   error: string | null;
@@ -34,8 +36,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   runId: null,
   isRunning: false,
   currentStep: null,
-  currentText: '',
-  currentToolCalls: [],
+  accumulatedText: '',
+  liveToolCalls: [],
   runningTools: {},
   abortController: null,
   error: null,
@@ -46,8 +48,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       runId,
       isRunning: true,
       currentStep: null,
-      currentText: '',
-      currentToolCalls: [],
+      accumulatedText: '',
+      liveToolCalls: [],
       runningTools: {},
       abortController: ac,
       error: null,
@@ -63,16 +65,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setStep: (step) =>
     set({
       currentStep: step,
-      // Reset the streaming buffer for the new step.
-      currentText: '',
-      currentToolCalls: [],
+      // Step completed → tool calls are now persisted to Dexie.
+      // Clear only the live tool call buffer; accumulatedText stays.
+      liveToolCalls: [],
     }),
 
   appendText: (text) =>
-    set((s) => ({ currentText: s.currentText + text })),
+    set((s) => ({ accumulatedText: s.accumulatedText + text })),
 
   addStreamingToolCall: (tc) =>
-    set((s) => ({ currentToolCalls: [...s.currentToolCalls, tc] })),
+    set((s) => ({ liveToolCalls: [...s.liveToolCalls, tc] })),
 
   markTool: (toolCallId, status) =>
     set((s) => ({ runningTools: { ...s.runningTools, [toolCallId]: status } })),
@@ -82,8 +84,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       isRunning: false,
       abortController: null,
       currentStep: null,
-      currentText: '',
-      currentToolCalls: [],
+      liveToolCalls: [],
     }),
 
   fail: (message) =>
@@ -91,8 +92,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       isRunning: false,
       abortController: null,
       error: message,
-      currentText: '',
-      currentToolCalls: [],
+      liveToolCalls: [],
     }),
 
   reset: () =>
@@ -100,8 +100,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       runId: null,
       isRunning: false,
       currentStep: null,
-      currentText: '',
-      currentToolCalls: [],
+      accumulatedText: '',
+      liveToolCalls: [],
       runningTools: {},
       abortController: null,
       error: null,

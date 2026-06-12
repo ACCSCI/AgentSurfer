@@ -22,6 +22,8 @@ export default function App() {
   const setRunId = useAgentStore((s) => s.start);
   const appendText = useAgentStore((s) => s.appendText);
   const addStreamingToolCall = useAgentStore((s) => s.addStreamingToolCall);
+  const accumulatedText = useAgentStore((s) => s.accumulatedText);
+  const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
   const cancelRun = useAgentStore((s) => s.cancel);
   const finishRun = useAgentStore((s) => s.finish);
   const failRun = useAgentStore((s) => s.fail);

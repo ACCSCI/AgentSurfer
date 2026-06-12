@@ -68,18 +68,21 @@ export default function App() {
   const addTcRef = useRef(addStreamingToolCall);
   addTcRef.current = addStreamingToolCall;
 
-  // Message listener for agent lifecycle + streaming chunks.
+  // Event listener — pure event consumption. UI owns all state.
   useEffect(() => {
-    const listener = (message: { type?: string; __fromSW?: boolean; [k: string]: unknown }) => {
-      if (!message.__fromSW) return; // Ignore messages from other extension pages.
-      if (message.type === 'agent:step') {
-        setStepRef.current((message as { step: unknown }).step as never);
-      } else if (message.type === 'agent:done') {
+    const handler = (message: { type?: string; __fromSW?: boolean; [k: string]: unknown }) => {
+      if (!message.__fromSW) return;
+      const t = message.type;
+      if (t === 'user_message') return; // UI already shows the user bubble.
+      if (t === 'model_ready') return; // UI doesn't need this.
+      if (t === 'step_done') {
+        setStepRef.current((message as { update: StepUpdate }).update);
+      } else if (t === 'agent_done') {
         finishRef.current();
-      } else if (message.type === 'agent:error') {
+      } else if (t === 'agent_error') {
         failRef.current(String((message as { message?: string }).message ?? 'Agent error'));
-      } else if (message.type === 'agent:chunk') {
-        const c = (message as { chunk?: { type: string; [k: string]: unknown } }).chunk;
+      } else if (t === 'chunk') {
+        const c = (message as { data?: { type: string; [k: string]: unknown } }).data;
         if (!c) return;
         if (c.type === 'text-delta' && typeof c.textDelta === 'string') {
           appendTextRef.current(c.textDelta);
@@ -92,18 +95,13 @@ export default function App() {
           addTcRef.current({
             id: c.toolCallId as string,
             name: c.toolName as string,
-            args:
-              (typeof c.args === 'string'
-                ? safeJson(c.args)
-                : (c.args as Record<string, unknown>)) ?? {},
+            args: (typeof c.args === 'string' ? safeJson(c.args) : (c.args as Record<string, unknown>)) ?? {},
           });
         }
-      } else if (message.type === '__sw:log') {
-        console.log((message as { line: string }).line);
       }
     };
-    chrome.runtime.onMessage.addListener(listener);
-    return () => chrome.runtime.onMessage.removeListener(listener);
+    chrome.runtime.onMessage.addListener(handler);
+    return () => chrome.runtime.onMessage.removeListener(handler);
   }, []);
 
   function safeJson(s: string): Record<string, unknown> {

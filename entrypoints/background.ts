@@ -76,77 +76,24 @@ async function handleMessage(
       const ac = new AbortController();
       inflight.set(runId, ac);
 
-      // Fan-out helper: send a step update to any open extension page.
-      const broadcast = (msg: unknown) => {
-        const tagged = { ...(msg as Record<string, unknown>), __fromSW: true };
-        const m = tagged as { type?: string; chunk?: unknown; runId?: string };
-        if (m.type === 'agent:chunk' && m.runId) {
-          const buf = chunkBuf.get(m.runId) ?? [];
-          if (m.chunk) buf.push(m.chunk);
-          chunkBuf.set(m.runId, buf);
-        } else {
-          try { chrome.runtime.sendMessage(tagged, () => {}); } catch {}
-        }
-      };
-      const log = (...args: unknown[]) => {
-        const line = `[SW ${runId}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`;
-        console.log(line);
-        broadcast({ type: '__sw:log', line });
-      };
-      // also forward console.log from agent.ts to the test runner
-      const origConsoleLog = console.log;
-      const origConsoleError = console.error;
-      console.log = (...args: unknown[]) => {
-        origConsoleLog(...args);
-        broadcast({ type: '__sw:log', line: '[AgentSurfer] ' + args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') });
-      };
-      console.error = (...args: unknown[]) => {
-        origConsoleError(...args);
-        broadcast({ type: '__sw:log', line: '[AgentSurfer][err] ' + args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') });
+      // Emit function: raw event → side panel. No buffering. No state.
+      const emit = (event: { type: string; [k: string]: unknown }) => {
+        const tagged = { ...event, __fromSW: true };
+        try { chrome.runtime.sendMessage(tagged, () => {}); } catch {}
       };
 
-      log('agent:start', { sessionId, promptPreview: prompt.slice(0, 80), provider: config.provider, modelId: config.modelId });
+      console.log(`[SW] agent:start run=${runId}`);
 
-      // Run async; resolve the message once the agent is started so the UI
-      // can show the "running" state. The agent itself keeps running.
+      // Fire-and-forget. Agent emits events; never returns a result.
       runAgent({
         sessionId,
         prompt,
         config,
         abortSignal: ac.signal,
-        onStep: (step: StepUpdate) => {
-          log('agent:step', step.stepNumber, 'toolCalls=' + step.toolCalls.length, 'toolResults=' + step.toolResults.length);
-          broadcast({ type: 'agent:step', runId, step });
-        },
-        onChunk: (chunk) => {
-          const c = chunk as { type: string };
-          if (c.type === 'text-delta' || c.type === 'reasoning' || c.type === 'reasoning-delta') {
-            log('agent:chunk', c.type, JSON.stringify((chunk as { textDelta?: string }).textDelta));
-          } else if (c.type === 'tool-call' || c.type === 'tool-call-delta') {
-            const tc = chunk as { toolName?: string; toolCallId?: string; argsTextDelta?: string };
-            log('agent:chunk', c.type, tc.toolName, tc.toolCallId, JSON.stringify(tc.argsTextDelta));
-          } else {
-            log('agent:chunk', c.type);
-          }
-          broadcast({ type: 'agent:chunk', runId, chunk });
-        },
-        onError: (err) => {
-          log('agent:error', err.message, err.stack?.split('\n').slice(0, 3).join(' | '));
-          broadcast({ type: 'agent:error', runId, message: err.message });
-          inflight.delete(runId);
-        },
-        onDone: (info) => {
-          log('agent:done', info);
-          broadcast({ type: 'agent:done', runId, totalUsage: info.totalUsage });
-          inflight.delete(runId);
-        },
+        emit,
       }).catch((err) => {
-        log('agent:caught', err instanceof Error ? err.message : String(err));
-        broadcast({
-          type: 'agent:error',
-          runId,
-          message: err instanceof Error ? err.message : String(err),
-        });
+        console.error('[SW] agent:caught', err);
+        emit({ type: 'agent_error', message: err instanceof Error ? err.message : String(err) });
         inflight.delete(runId);
       });
 

@@ -6,6 +6,7 @@ import { type CoreMessage, streamText } from 'ai';
 import {
   appendMessage,
   appendStep,
+  db,
   getEnabledToolNames,
   getMessagesBySession,
   newId,
@@ -193,6 +194,13 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   // Generate dynamic system prompt based on enabled tools.
   const dynamicPrompt = buildSystemPrompt(enabledNames);
 
+  // Timeout: kill the run if it takes too long (CDP tools may hang).
+  const RUN_TIMEOUT = 90_000; // 90 seconds
+  const runTimeout = setTimeout(() => {
+    console.error(`[AgentSurfer] run timeout after ${RUN_TIMEOUT}ms — aborting`);
+    input.abortSignal.dispatchEvent(new Event('abort'));
+  }, RUN_TIMEOUT);
+
   const result = streamText({
     model,
     system: dynamicPrompt,
@@ -340,12 +348,30 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   //    AI SDK v4: `result.text` is a getter; the stream is lazy. We must
   //    call `consumeStream()` to actually drain it and fire onChunk /
   //    onStepFinish callbacks.
+  console.log('[AgentSurfer] calling consumeStream...');
   try {
     await result.consumeStream();
+    console.log('[AgentSurfer] consumeStream done');
   } catch (err) {
     console.error('[AgentSurfer] consumeStream error:', err);
   }
+  clearTimeout(runTimeout);
+  console.log('[AgentSurfer] reading result.text...');
   const finalText = (await result.text).trim();
+  console.log('[AgentSurfer] finalText length:', finalText.length, 'runReasoning length:', runReasoning.length);
+
+  // Try to extract structured task state from the final text.
+  // If the model outputs a JSON block, parse it as task state.
+  let taskState: Record<string, unknown> | null = null;
+  const jsonMatch = finalText.match(/\{[\s\S]*"goal"[\s\S]*"current_step"[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      taskState = JSON.parse(jsonMatch[0]);
+      console.log('[AgentSurfer] parsed task state:', taskState);
+    } catch {
+      // Not valid JSON — leave as null.
+    }
+  }
 
   // Persist both reasoning and text to Dexie so old messages show the
   // full thinking process even after a new run starts.
@@ -358,11 +384,20 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   if (finalText) {
     displayParts.push({ type: 'text', text: finalText });
   }
-  await appendMessage({
+  const msg = await appendMessage({
     sessionId: input.sessionId,
     role: 'assistant',
     parts: displayParts as any,
   });
+
+  // If task state was parsed, save it to the session.
+  if (taskState && input.sessionId) {
+    try {
+      await db.sessions.update(input.sessionId, { taskState });
+    } catch {
+      // Best effort — don't break the run if this fails.
+    }
+  }
 }
 
 // ---------- Adapters from AI SDK v4 event shape to our DB shape ----------

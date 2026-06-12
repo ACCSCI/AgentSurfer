@@ -12,6 +12,8 @@ export const ChatSessionSchema = z.object({
   // The model config used for this session — frozen at creation time so a
   // config edit later doesn't affect history.
   frozenConfig: ModelConfigSchema.optional(),
+  // Structured task state parsed from the agent's final output.
+  taskState: z.record(z.unknown()).optional(),
 });
 export type ChatSession = z.infer<typeof ChatSessionSchema>;
 

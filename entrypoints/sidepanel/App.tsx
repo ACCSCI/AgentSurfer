@@ -31,6 +31,7 @@ export default function App() {
   const failRun = useAgentStore((s) => s.fail);
   const resetAgent = useAgentStore((s) => s.reset);
   const isRunning = useAgentStore((s) => s.isRunning);
+  const currentRunId = useAgentStore((s) => s.runId);
 
   const mostRecentSession = useLiveQuery(
     async () => (await db.sessions.orderBy('updatedAt').reverse().first()) ?? null,
@@ -67,6 +68,7 @@ export default function App() {
   const addTcRef = useRef(addStreamingToolCall);
   addTcRef.current = addStreamingToolCall;
 
+  // Message listener for agent lifecycle + streaming chunks.
   useEffect(() => {
     const listener = (message: { type?: string; [k: string]: unknown }) => {
       if (message.type === 'agent:step') {
@@ -81,7 +83,7 @@ export default function App() {
         if (c.type === 'text-delta' && typeof c.textDelta === 'string') {
           appendTextRef.current(c.textDelta);
         } else if (c.type === 'reasoning' || c.type === 'reasoning-delta') {
-          const text = (c.textDelta as string) ?? (c.text as string) ?? '';
+          const text = ((c as { textDelta?: string; text?: string }).textDelta ?? (c as { text?: string }).text ?? '');
           if (text) appendReasoningRef.current(text);
         } else if (c.type === 'tool-call' && c.toolCallId && c.toolName) {
           addTcRef.current({
@@ -91,7 +93,6 @@ export default function App() {
           });
         }
       } else if (message.type === '__sw:log') {
-        // Bridge SW logs into the page console so the test runner can see them.
         // eslint-disable-next-line no-console
         console.log((message as { line: string }).line);
       }

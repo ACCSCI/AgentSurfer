@@ -156,6 +156,14 @@ export class CDPService {
   // ---------- Overlay (visual feedback) ----------
 
   private highlightVisible = false;
+  private overlayEnabled = false;
+
+  /** Enable the Overlay domain (must be called before highlightQuad). */
+  async enableOverlay(): Promise<void> {
+    if (this.overlayEnabled) return;
+    await this.send('Overlay.enable');
+    this.overlayEnabled = true;
+  }
 
   /**
    * Draw a highlight quad (small colored square) at (x, y) with the given
@@ -163,6 +171,7 @@ export class CDPService {
    * The quad is centered on (x, y).
    */
   async highlightQuad(x: number, y: number, size = 6): Promise<void> {
+    await this.enableOverlay();
     const half = size / 2;
     // Four corners of the square, centered on (x, y).
     const quad = [

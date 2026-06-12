@@ -376,48 +376,40 @@ Use schedule mode to detect page load completion or animation without paying ima
   },
 });
 
-// ---------- CDP-based tools (native input) ----------
+// ---------- CDP-based tools (native input, singleton connection) ----------
 
-import {
-  cdpClick as cdpClickNative,
-  cdpType as cdpTypeNative,
-  cdpPressKey as cdpPressKeyNative,
-  cdpScreenshot as cdpScreenshotNative,
-  cdpDetach,
-} from '@/lib/cdp';
+import { getCurrentCDP } from '@/lib/cdp';
 
 export const cdpClick = tool({
   description:
-    'Click at a viewport coordinate (x, y) using native CDP mouse events. Use domQuery first to find the element and get its bounding box, then pass the center coordinates here. This is more reliable than domClick because it uses real browser input events.',
+    'Click at a viewport coordinate (x, y) using native CDP mouse events. Use domQuery first to find the element and get its bounding box, then pass the center coordinates here.',
   parameters: z.object({
     x: z.number().int().min(0).describe('Viewport X coordinate'),
     y: z.number().int().min(0).describe('Viewport Y coordinate'),
   }),
   execute: async ({ x, y }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
-    try {
-      await cdpClickNative(tab.id, x, y);
-      return { ok: true, x, y };
-    } finally {
-      await cdpDetach(tab.id);
-    }
+    await cdp.attach(tab.id);
+    await cdp.click(x, y);
+    return { ok: true, x, y };
   },
 });
 
 export const cdpType = tool({
   description:
-    'Type text character by character using native CDP keyboard events. More reliable than domType because it uses real browser input. After typing, you may need to call pressKey to submit.',
+    'Type text character by character using native CDP keyboard events. More reliable than domType.',
   parameters: z.object({
     text: z.string().describe('The text to type'),
   }),
   execute: async ({ text }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
-    try {
-      await cdpTypeNative(tab.id, text);
-      return { ok: true, length: text.length };
-    } finally {
-      await cdpDetach(tab.id);
-    }
+    await cdp.attach(tab.id);
+    await cdp.type(text);
+    return { ok: true, length: text.length };
   },
 });
 
@@ -430,13 +422,12 @@ export const cdpPressKey = tool({
       .describe('The key to press'),
   }),
   execute: async ({ key }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
-    try {
-      await cdpPressKeyNative(tab.id, key);
-      return { ok: true, key };
-    } finally {
-      await cdpDetach(tab.id);
-    }
+    await cdp.attach(tab.id);
+    await cdp.pressKey(key);
+    return { ok: true, key };
   },
 });
 
@@ -445,16 +436,15 @@ export const cdpScreenshot = tool({
     'Take a screenshot of the active tab using CDP (more reliable than the JS-based screenshot).',
   parameters: z.object({}).strict(),
   execute: async () => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     if (!tab.url || !tab.url.startsWith('http')) {
       return { error: `Cannot capture non-http URL (${tab.url || 'empty'}).` };
     }
-    try {
-      const dataUrl = await cdpScreenshotNative(tab.id);
-      return { dataUrl, width: tab.width ?? 0, height: tab.height ?? 0 };
-    } finally {
-      await cdpDetach(tab.id);
-    }
+    await cdp.attach(tab.id);
+    const dataUrl = await cdp.screenshot();
+    return { dataUrl, width: tab.width ?? 0, height: tab.height ?? 0 };
   },
   experimental_toToolResultContent: (output) => [
     { type: 'text', text: `Screenshot captured (${output.width}x${output.height}px).` },

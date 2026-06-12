@@ -13,6 +13,7 @@ import {
 } from '@/lib/db';
 import { allTools } from '@/lib/tools';
 import { createModel } from '@/lib/llm';
+import { CDPService, setCurrentCDP } from '@/lib/cdp';
 import type {
   ModelConfig,
   ToolCall as DbToolCall,
@@ -120,6 +121,19 @@ export interface RunAgentInput {
  * every step to Dexie, and pushes live step updates to the caller.
  */
 export async function runAgent(input: RunAgentInput): Promise<void> {
+  // Create CDP service for this run. Shared by all CDP tools.
+  const cdpService = new CDPService();
+  setCurrentCDP(cdpService);
+
+  try {
+    await runAgentInner(input, cdpService);
+  } finally {
+    setCurrentCDP(null);
+    await cdpService.detach();
+  }
+}
+
+async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Promise<void> {
   // 1. Persist the user message.
   await appendMessage({
     sessionId: input.sessionId,

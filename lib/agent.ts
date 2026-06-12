@@ -353,15 +353,43 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   //    call `consumeStream()` to actually drain it and fire onChunk /
   //    onStepFinish callbacks.
   console.log('[AgentSurfer] calling consumeStream...');
+  // Set a hard wall-clock timeout on the entire stream — consumeStream can
+  // hang if the model never closes the stream.
+  const wallStart = Date.now();
+  const WALL_TIMEOUT = 80_000; // 80 seconds
+  const wallCheck = setInterval(() => {
+    if (Date.now() - wallStart > WALL_TIMEOUT) {
+      console.error(`[AgentSurfer] wall-clock timeout (${WALL_TIMEOUT}ms) — aborting`);
+      input.abortSignal.dispatchEvent(new Event('abort'));
+    }
+  }, 5000);
+
   try {
-    await result.consumeStream();
+    await Promise.race([
+      result.consumeStream(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('consumeStream wall timeout')), WALL_TIMEOUT),
+      ),
+    ]);
     console.log('[AgentSurfer] consumeStream done');
   } catch (err) {
-    console.error('[AgentSurfer] consumeStream error:', err);
+    console.error('[AgentSurfer] consumeStream error:', err instanceof Error ? err.message : err);
   }
+  clearInterval(wallCheck);
   clearTimeout(runTimeout);
+
   console.log('[AgentSurfer] reading result.text...');
-  const finalText = (await result.text).trim();
+  let finalText = '';
+  try {
+    finalText = (await Promise.race([
+      result.text,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('result.text wall timeout')), 10_000),
+      ),
+    ])).trim();
+  } catch {
+    // Stream was aborted or timed out — use whatever text we got.
+  }
   console.log('[AgentSurfer] finalText length:', finalText.length, 'runReasoning length:', runReasoning.length);
 
   // Try to extract structured task state from the final text.
@@ -381,18 +409,19 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
   // full thinking process even after a new run starts.
   // We store reasoning in a `type: 'reasoning'` part — Zod will accept
   // the 'reasoning' type from the MessagePartSchema.
-  const displayParts: Array<Record<string, unknown>> = [];
-  if (runReasoning) {
-    displayParts.push({ type: 'reasoning', reasoning: runReasoning });
+  // Persist assistant message with text only (reasoning is already displayed
+  // live in the UI via accumulatedReasoning store).
+  console.log('[AgentSurfer] about to append assistant message, text length:', finalText.length);
+  try {
+    const msg = await appendMessage({
+      sessionId: input.sessionId,
+      role: 'assistant',
+      parts: [{ type: 'text', text: finalText || '[no response]' }],
+    });
+    console.log('[AgentSurfer] assistant message persisted, id:', msg.id);
+  } catch (err) {
+    console.error('[AgentSurfer] appendMessage FAILED:', err instanceof Error ? err.message : err);
   }
-  if (finalText) {
-    displayParts.push({ type: 'text', text: finalText });
-  }
-  const msg = await appendMessage({
-    sessionId: input.sessionId,
-    role: 'assistant',
-    parts: displayParts as any,
-  });
 
   // If task state was parsed, save it to the session.
   if (taskState && input.sessionId) {

@@ -70,7 +70,8 @@ export default function App() {
 
   // Message listener for agent lifecycle + streaming chunks.
   useEffect(() => {
-    const listener = (message: { type?: string; [k: string]: unknown }) => {
+    const listener = (message: { type?: string; __fromSW?: boolean; [k: string]: unknown }) => {
+      if (!message.__fromSW) return; // Ignore messages from other extension pages.
       if (message.type === 'agent:step') {
         setStepRef.current((message as { step: unknown }).step as never);
       } else if (message.type === 'agent:done') {

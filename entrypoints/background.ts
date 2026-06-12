@@ -25,6 +25,7 @@ export default defineBackground(() => {
   // Map of runId -> AbortController. Persisted to chrome.storage.session so
   // a service-worker restart doesn't lose the in-flight run.
   const inflight = new Map<string, AbortController>();
+  const chunkBuf = new Map<string, unknown[]>();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
@@ -77,9 +78,15 @@ async function handleMessage(
 
       // Fan-out helper: send a step update to any open extension page.
       const broadcast = (msg: unknown) => {
-        try {
-          chrome.runtime.sendMessage(msg, () => {});
-        } catch {}
+        const tagged = { ...(msg as Record<string, unknown>), __fromSW: true };
+        const m = tagged as { type?: string; chunk?: unknown; runId?: string };
+        if (m.type === 'agent:chunk' && m.runId) {
+          const buf = chunkBuf.get(m.runId) ?? [];
+          if (m.chunk) buf.push(m.chunk);
+          chunkBuf.set(m.runId, buf);
+        } else {
+          try { chrome.runtime.sendMessage(tagged, () => {}); } catch {}
+        }
       };
       const log = (...args: unknown[]) => {
         const line = `[SW ${runId}] ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')}`;
@@ -154,6 +161,18 @@ async function handleMessage(
         return { cancelled: true };
       }
       return { cancelled: false, reason: 'no-such-run' };
+    }
+
+    case '__chunks:pull': {
+      const runId = (message as { runId: string }).runId;
+      const buf = chunkBuf.get(runId);
+      if (!buf) return { chunks: [] };
+      const chunks = buf.splice(0, buf.length);
+      // Clean up only when: (a) no chunks left AND (b) run is done.
+      if (chunks.length === 0 && !inflight.has(runId)) {
+        chunkBuf.delete(runId);
+      }
+      return { chunks };
     }
 
     case 'agent:list': {

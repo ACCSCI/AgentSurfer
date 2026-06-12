@@ -30,7 +30,14 @@ export default defineConfig({
     // 404 on its own assets and Chrome will mark the SW "Invalid".
     web_accessible_resources: [
       {
-        resources: ['sidepanel.html', 'options.html', 'icon/*', 'content-scripts/*'],
+        resources: [
+          'sidepanel.html',
+          'options.html',
+          'icon/*',
+          'content-scripts/*',
+          'chunks/*',
+          'assets/*',
+        ],
         matches: ['<all_urls>'],
       },
     ],

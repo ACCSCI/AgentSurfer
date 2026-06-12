@@ -148,10 +148,30 @@ export class CDPService {
     });
   }
 
+  async scroll(deltaX: number, deltaY: number): Promise<void> {
+    const { x, y } = this.lastAimPos;
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX,
+      deltaY,
+      button: 'none',
+      buttons: 0,
+      clickCount: 0,
+    });
+  }
+
   async screenshot(): Promise<string> {
     const result = await this.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
     return `data:image/png;base64,${result.data}`;
   }
+
+  private lastAimPos: { x: number; y: number } = { x: 0, y: 0 };
+
+  /** Get the last aim position (for scroll, etc.). */
+  get aimX(): number { return this.lastAimPos.x; }
+  get aimY(): number { return this.lastAimPos.y; }
 
   // ---------- Overlay (visual feedback) ----------
 
@@ -172,6 +192,7 @@ export class CDPService {
    * The quad is centered on (x, y).
    */
   async highlightQuad(x: number, y: number, size = 6): Promise<void> {
+    this.lastAimPos = { x, y };
     await this.enableOverlay();
     const half = size / 2;
     // Four corners of the square, centered on (x, y).

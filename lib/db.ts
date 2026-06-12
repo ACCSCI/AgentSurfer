@@ -198,7 +198,7 @@ import { ALL_TOOLS, type ToolName } from '@/types';
 
 // Default: CDP tools + smart screenshot + tabs enabled. Others disabled.
 const DEFAULT_ENABLED = new Set([
-  'cdpAim', 'cdpConfirm', 'cdpCancel',
+  'cdpAim', 'cdpConfirm', 'cdpScroll', 'cdpCancel',
   'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
   'smartScreenshot',
   'tabsList', 'tabsSwitch', 'tabsOpen',

@@ -88,12 +88,14 @@ When a page just loaded or you need to detect changes, use smartScreenshot with 
     sections.push(`ACT, DON'T NARRATE:
 After observing, your next response MUST be a tool call or the final answer. Never write "Let me click..." without calling the tool.
 
-CLICKING: ALWAYS use the aim→confirm flow:
+CLICKING / SCROLLING: ALWAYS use the aim→action flow:
 1. cdpAim(x, y) — draws a red crosshair at (x,y), returns a screenshot
 2. Look at the screenshot: is the red square on your target?
-3. If YES → cdpConfirm(x, y) — clears crosshair and clicks
-4. If NO → cdpAim(修正坐标) — redraw at correct position, re-screenshot, then confirm
-5. NEVER call cdpClick directly — always aim first, then confirm`);
+3. If CLICKING: cdpConfirm(x, y) — clears crosshair and clicks
+4. If SCROLLING: cdpScroll({ deltaY: 300 }) — scrolls at the crosshair position (no coordinates needed)
+5. If WRONG: cdpAim(修正坐标) — redraw at correct position, re-screenshot, then confirm
+6. If DECIDING NOT TO ACT: cdpCancel() — clears crosshair
+7. NEVER call cdpClick/directly — always aim first, then confirm/scroll`);
   }
 
   if (has('pressKey')) {

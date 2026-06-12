@@ -495,9 +495,26 @@ export const cdpConfirm = tool({
   },
 });
 
+export const cdpScroll = tool({
+  description:
+    'Scroll the page at the position of the last cdpAim crosshair. Use after cdpAim to scroll while keeping the aim position. deltaY > 0 = scroll down, deltaY < 0 = scroll up. deltaX > 0 = scroll right, deltaX < 0 = scroll left.',
+  parameters: z.object({
+    deltaY: z.number().int().describe('Vertical scroll amount in pixels (positive=down, negative=up)'),
+    deltaX: z.number().int().default(0).describe('Horizontal scroll amount in pixels'),
+  }),
+  execute: async ({ deltaX, deltaY }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
+    const tab = await getActiveTab();
+    await cdp.attach(tab.id);
+    await cdp.scroll(deltaX, deltaY);
+    return { ok: true, deltaX, deltaY, atX: cdp.aimX, atY: cdp.aimY };
+  },
+});
+
 export const cdpCancel = tool({
   description:
-    'Clear the red crosshair without clicking. Use this if you decide NOT to click at the aimed position.',
+    'Clear the red crosshair without clicking. Use this if you decide NOT to click or scroll at the aimed position.',
   parameters: z.object({}).strict(),
   execute: async () => {
     const cdp = getCurrentCDP();
@@ -515,6 +532,7 @@ export const allTools = {
   // CDP native input + visual feedback.
   cdpAim,
   cdpConfirm,
+  cdpScroll,
   cdpCancel,
   cdpClick,
   cdpType,

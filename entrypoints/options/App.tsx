@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Separator } from '@/components/ui/separator';
 import { db, deleteConfig, newId, now, setActiveConfig, upsertConfig } from '@/lib/db';
 import { KnownModels } from '@/lib/llm';
+import { ToolConfigPanel } from './components/ToolConfigPanel';
 import {
   DefaultBaseUrl,
   DefaultModelId,
@@ -55,6 +56,8 @@ export default function OptionsApp() {
           </div>
         </ScrollArea>
       </section>
+
+      <ToolConfigPanel />
 
       <p className="mt-6 text-xs text-muted-foreground">
         API keys are stored locally in this browser via IndexedDB. They never leave your machine

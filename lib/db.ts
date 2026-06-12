@@ -9,6 +9,7 @@ import type {
   ChatSession,
   ModelConfig,
   ScreenshotMeta,
+  ToolConfig,
 } from '@/types';
 
 // ---------- Internal types (Dexie rows) ----------
@@ -25,20 +26,23 @@ export class AgentSurferDB extends Dexie {
   agentSteps!: EntityTable<AgentStep, 'id'>;
   screenshots!: EntityTable<ScreenshotRow, 'id'>;
   modelConfigs!: EntityTable<ModelConfig, 'id'>;
+  toolConfigs!: EntityTable<ToolConfig, 'name'>;
 
   constructor() {
     super('AgentSurferDB');
 
     // v1 — initial schema.
-    // https://dexie.org/docs/Tutorial/Design#database-versioning
     this.version(1).stores({
       sessions: 'id, updatedAt, createdAt',
       messages: 'id, sessionId, role, createdAt, [sessionId+createdAt]',
       agentSteps: 'id, messageId, stepNumber, [messageId+stepNumber]',
       screenshots: 'id, stepId, createdAt',
-      // Note: `isDefault` is a boolean and cannot be indexed in Dexie;
-      // resolve the active config via a table scan (configs are tiny).
       modelConfigs: 'id, provider, createdAt',
+    });
+
+    // v2 — add toolConfigs table.
+    this.version(2).stores({
+      toolConfigs: 'name',
     });
   }
 }
@@ -186,4 +190,32 @@ export async function setActiveConfig(id: string): Promise<void> {
       all.map((c) => db.modelConfigs.update(c.id, { isDefault: c.id === id })),
     );
   });
+}
+
+// ---------- Tool config helpers ----------
+
+import { ALL_TOOLS, type ToolName } from '@/types';
+
+/** Get all tool configs, initializing defaults if table is empty. */
+export async function getToolConfigs(): Promise<ToolConfig[]> {
+  const existing = await db.toolConfigs.toArray();
+  if (existing.length === ALL_TOOLS.length) return existing;
+  // Initialize: all tools enabled by default.
+  const defaults: ToolConfig[] = ALL_TOOLS.map((name) => ({
+    name,
+    enabled: true,
+  }));
+  await db.toolConfigs.bulkPut(defaults);
+  return defaults;
+}
+
+/** Get a set of enabled tool names for quick lookup. */
+export async function getEnabledToolNames(): Promise<Set<string>> {
+  const configs = await getToolConfigs();
+  return new Set(configs.filter((c) => c.enabled).map((c) => c.name));
+}
+
+/** Toggle a single tool on/off. */
+export async function setToolEnabled(name: string, enabled: boolean): Promise<void> {
+  await db.toolConfigs.put({ name, enabled });
 }

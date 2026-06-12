@@ -53,6 +53,29 @@ export const DefaultModelId: Record<Provider, string> = {
   mock: 'mock:happy',
 };
 
+// ---------- ToolConfig ----------
+
+export const ALL_TOOLS = [
+  'focusNext',
+  'focusPrevious',
+  'smartScreenshot',
+  'screenshot',
+  'tabsList',
+  'tabsSwitch',
+  'tabsOpen',
+  'domQuery',
+  'domClick',
+  'domType',
+  'pressKey',
+] as const;
+export type ToolName = (typeof ALL_TOOLS)[number];
+
+export const ToolConfigSchema = z.object({
+  name: z.string(),
+  enabled: z.boolean().default(true),
+});
+export type ToolConfig = z.infer<typeof ToolConfigSchema>;
+
 // ---------- ModelConfig ----------
 
 export const ModelConfigSchema = z

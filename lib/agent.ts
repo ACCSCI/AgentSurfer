@@ -6,6 +6,7 @@ import { type CoreMessage, streamText } from 'ai';
 import {
   appendMessage,
   appendStep,
+  getEnabledToolNames,
   getMessagesBySession,
   newId,
   saveScreenshot,
@@ -46,6 +47,61 @@ RULES:
 - When in doubt, screenshot first.`;
 
 const MAX_STEPS = 30;
+
+/** Build a system prompt dynamically based on which tools are enabled. */
+function buildSystemPrompt(enabledTools: Set<string>): string {
+  const has = (t: string) => enabledTools.has(t);
+
+  const sections: string[] = [];
+
+  // Core workflow
+  sections.push(`You are AgentSurfer, an AI browser agent that can see and control the active browser tab.
+
+WORKFLOW (always follow):
+1. BEFORE you act, ensure a real http/https tab is active. Use tabsList then tabsSwitch or tabsOpen.
+2. ALWAYS wait for the page to finish loading. If you just opened a tab or clicked a link, wait briefly.
+3. Start by taking a screenshot to see the current state.
+4. Use the minimum actions needed to accomplish the goal.
+5. When done, reply with a concise summary.`);
+
+  // Finding elements — only include relevant tools
+  if (has('domQuery') || has('domClick') || has('domType')) {
+    sections.push(`FINDING ELEMENTS:
+1. domQuery: input[name="q"], input[type="search"], textarea, input[type="text"]
+2. If domQuery fails, use focusNext/focusPrevious to Tab through and find the input by its accessible name.`);
+  }
+
+  if (has('focusNext')) {
+    sections.push(`FOCUS NAVIGATION:
+Use focusNext to Tab through the page. Each step returns the focused element's accessible name and role. Look for names containing "search", "input", "query", "text field".`);
+  }
+
+  if (has('smartScreenshot')) {
+    sections.push(`SMART SCREENSHOT SCHEDULE:
+When a page just loaded or you need to detect changes, use smartScreenshot with { schedule: { durationMs: 2000, intervalMs: 500 } }. The response shows frame-by-frame changes — when values drop to 0, the page is stable. A blinking vertical line in the bbox means a focused text input.`);
+  }
+
+  // Action rules
+  if (has('domClick') && has('domType')) {
+    sections.push(`ACT, DON'T NARRATE:
+After observing, your next response MUST be a tool call or the final answer. Never write "Let me click..." without calling the tool.`);
+  }
+
+  if (has('pressKey')) {
+    sections.push(`FORM SUBMISSION:
+After typing with domType, press Enter with pressKey({ key: "Enter" }) to submit.`);
+  }
+
+  // Safety rules (always included)
+  sections.push(`RULES:
+- Never enter passwords/sensitive values without user confirmation.
+- If a selector fails 3 times, try a different method.
+- If the page is chrome://, file://, or about:, stop and tell the user.
+- Be concise. Don't narrate steps the user can see in the trace.
+- When in doubt, screenshot first.`);
+
+  return sections.join('\n\n');
+}
 
 export interface RunAgentInput {
   sessionId: string;
@@ -101,11 +157,21 @@ export async function runAgent(input: RunAgentInput): Promise<void> {
   let stepCounter = 0;
   const startMs = Date.now();
 
+  // Filter tools based on enabled config.
+  const enabledNames = await getEnabledToolNames();
+  const enabledTools = Object.fromEntries(
+    Object.entries(allTools).filter(([name]) => enabledNames.has(name)),
+  );
+  console.log('[AgentSurfer] enabled tools:', Object.keys(enabledTools).join(', '));
+
+  // Generate dynamic system prompt based on enabled tools.
+  const dynamicPrompt = buildSystemPrompt(enabledNames);
+
   const result = streamText({
     model,
-    system: SYSTEM_PROMPT,
+    system: dynamicPrompt,
     messages: modelMessages,
-    tools: allTools,
+    tools: enabledTools,
     maxSteps: MAX_STEPS,
     abortSignal: input.abortSignal,
     onChunk: ({ chunk }) => {

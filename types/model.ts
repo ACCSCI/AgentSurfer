@@ -56,6 +56,10 @@ export const DefaultModelId: Record<Provider, string> = {
 // ---------- ToolConfig ----------
 
 export const ALL_TOOLS = [
+  'cdpClick',
+  'cdpType',
+  'cdpPressKey',
+  'cdpScreenshot',
   'focusNext',
   'focusPrevious',
   'smartScreenshot',

@@ -60,7 +60,7 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
           key={m.id}
           message={m}
           steps={allStepsForSession.get(m.id) ?? []}
-          isLive={currentStep?.stepNumber != null && m.role === 'assistant'}
+          isLive={isRunning && currentStep?.stepNumber != null && m.role === 'assistant'}
           liveText={m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? accumulatedText : ''}
           liveToolCalls={
             m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? liveToolCalls : []

@@ -99,6 +99,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       abortController: null,
       error: message,
       liveToolCalls: [],
+      // Keep accumulatedText — the user should see what the model
+      // said before the error. Cleared only on reset().
     }),
 
   reset: () =>

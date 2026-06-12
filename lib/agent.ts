@@ -68,7 +68,8 @@ WORKFLOW (always follow):
   if (has('domQuery') || has('domClick') || has('domType')) {
     sections.push(`FINDING ELEMENTS:
 1. domQuery: input[name="q"], input[type="search"], textarea, input[type="text"]
-2. If domQuery fails, use focusNext/focusPrevious to Tab through and find the input by its accessible name.`);
+2. If domQuery fails, use focusNext to Tab through and find the input by its accessible name.
+3. Once found, get its bounding box from domQuery, then use cdpClick/cdpType (native input) instead of domClick/domType (JS events). CDP tools are more reliable on modern SPAs.`);
   }
 
   if (has('focusNext')) {
@@ -272,7 +273,18 @@ export async function runAgent(input: RunAgentInput): Promise<void> {
       });
     },
     onError: ({ error }) => {
-      input.onError(error instanceof Error ? error : new Error(String(error)));
+      // Save the error as a step record so the UI can show what happened.
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[AgentSurfer] onError:', errMsg);
+      appendStep({
+        messageId: assistantMessageId,
+        stepNumber: ++stepCounter,
+        text: `Error: ${errMsg}`,
+        toolCalls: [],
+        toolResults: [],
+        durationMs: 0,
+      }).catch(() => {});
+      input.onError(error instanceof Error ? error : new Error(errMsg));
     },
     onFinish: ({ steps }) => {
       console.log(

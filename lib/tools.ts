@@ -376,18 +376,110 @@ Use schedule mode to detect page load completion or animation without paying ima
   },
 });
 
+// ---------- CDP-based tools (native input) ----------
+
+import {
+  cdpClick as cdpClickNative,
+  cdpType as cdpTypeNative,
+  cdpPressKey as cdpPressKeyNative,
+  cdpScreenshot as cdpScreenshotNative,
+  cdpDetach,
+} from '@/lib/cdp';
+
+export const cdpClick = tool({
+  description:
+    'Click at a viewport coordinate (x, y) using native CDP mouse events. Use domQuery first to find the element and get its bounding box, then pass the center coordinates here. This is more reliable than domClick because it uses real browser input events.',
+  parameters: z.object({
+    x: z.number().int().min(0).describe('Viewport X coordinate'),
+    y: z.number().int().min(0).describe('Viewport Y coordinate'),
+  }),
+  execute: async ({ x, y }) => {
+    const tab = await getActiveTab();
+    try {
+      await cdpClickNative(tab.id, x, y);
+      return { ok: true, x, y };
+    } finally {
+      await cdpDetach(tab.id);
+    }
+  },
+});
+
+export const cdpType = tool({
+  description:
+    'Type text character by character using native CDP keyboard events. More reliable than domType because it uses real browser input. After typing, you may need to call pressKey to submit.',
+  parameters: z.object({
+    text: z.string().describe('The text to type'),
+  }),
+  execute: async ({ text }) => {
+    const tab = await getActiveTab();
+    try {
+      await cdpTypeNative(tab.id, text);
+      return { ok: true, length: text.length };
+    } finally {
+      await cdpDetach(tab.id);
+    }
+  },
+});
+
+export const cdpPressKey = tool({
+  description:
+    'Press a special key (Enter, Tab, Escape, etc.) using native CDP keyboard events.',
+  parameters: z.object({
+    key: z
+      .enum(['Enter', 'Tab', 'Escape', 'Backspace', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'])
+      .describe('The key to press'),
+  }),
+  execute: async ({ key }) => {
+    const tab = await getActiveTab();
+    try {
+      await cdpPressKeyNative(tab.id, key);
+      return { ok: true, key };
+    } finally {
+      await cdpDetach(tab.id);
+    }
+  },
+});
+
+export const cdpScreenshot = tool({
+  description:
+    'Take a screenshot of the active tab using CDP (more reliable than the JS-based screenshot).',
+  parameters: z.object({}).strict(),
+  execute: async () => {
+    const tab = await getActiveTab();
+    if (!tab.url || !tab.url.startsWith('http')) {
+      return { error: `Cannot capture non-http URL (${tab.url || 'empty'}).` };
+    }
+    try {
+      const dataUrl = await cdpScreenshotNative(tab.id);
+      return { dataUrl, width: tab.width ?? 0, height: tab.height ?? 0 };
+    } finally {
+      await cdpDetach(tab.id);
+    }
+  },
+  experimental_toToolResultContent: (output) => [
+    { type: 'text', text: `Screenshot captured (${output.width}x${output.height}px).` },
+    { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
+  ],
+});
+
+// ---------- Tool registry ----------
+
 export const allTools = {
+  // CDP-based native input (preferred).
+  cdpClick,
+  cdpType,
+  cdpPressKey,
+  cdpScreenshot,
   // Focus navigation (Tab key traversal).
   focusNext,
   focusPrevious,
   // Smart screenshot
   smartScreenshot,
-  screenshot,
   // Tab management
   tabsList,
   tabsSwitch,
   tabsOpen,
-  // DOM tools
+  // DOM tools (escape hatch — use CDP tools first).
   domQuery,
   domClick,
   domType,

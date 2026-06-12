@@ -14,7 +14,6 @@ interface AgentState {
   // Only cleared on start/reset/finish. This prevents the "flash and disappear"
   // when a step completes and the live section resets.
   accumulatedText: string;
-  // Reasoning/thinking text from the model (separate from final text).
   accumulatedReasoning: string;
   // Tool calls from the current in-progress step (before onStepFinish).
   // Cleared on setStep (step completed → tool calls are now in Dexie).
@@ -40,6 +39,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   isRunning: false,
   currentStep: null,
   accumulatedText: '',
+  accumulatedReasoning: '',
   liveToolCalls: [],
   runningTools: {},
   abortController: null,

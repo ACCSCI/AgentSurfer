@@ -8,8 +8,17 @@ import type { ModelConfig } from '@/types';
 import type { StepUpdate } from '@/types/messages';
 
 export default defineBackground(() => {
+  console.log('[AgentSurfer] SW loaded OK');
+
   // Initialize tool configs with defaults on first load.
-  initToolConfigs().catch(() => {});
+  // Deferred to first message to avoid blocking SW startup.
+  let toolConfigsReady = false;
+  async function ensureToolConfigs() {
+    if (!toolConfigsReady) {
+      await initToolConfigs();
+      toolConfigsReady = true;
+    }
+  }
 
   // Open side panel when the user clicks the action icon.
   // chrome.action.onClicked ONLY fires when there is no default_popup.
@@ -56,6 +65,7 @@ async function handleMessage(
   _sender: chrome.runtime.MessageSender,
   inflight: Map<string, AbortController>,
 ): Promise<unknown> {
+  await ensureToolConfigs();
   switch (message.type) {
     case 'screenshot:capture': {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -129,11 +139,16 @@ async function handleMessage(
     }
 
     case '__e2e:seed-config': {
-      // E2E-only: write a config straight to Dexie. Caller is expected to
-      // have authenticated this request somehow (test launcher only).
-      await upsertConfig(message.config);
-      await setActiveConfig(message.config.id);
-      return { ok: true, seeded: message.config.id };
+      console.log('[SW] __e2e:seed-config received', message.config.id);
+      try {
+        await upsertConfig(message.config);
+        await setActiveConfig(message.config.id);
+        console.log('[SW] __e2e:seed-config done');
+        return { ok: true, seeded: message.config.id };
+      } catch (err) {
+        console.error('[SW] __e2e:seed-config error:', err);
+        throw err;
+      }
     }
 
     case '__e2e:reset': {

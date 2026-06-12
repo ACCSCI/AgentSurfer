@@ -112,7 +112,7 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService): Prom
         durationMs: 0,
       };
       // Persist step to Dexie (side panel doesn't handle this — it's a DB write).
-      await appendStep({ messageId: '', stepNumber: stepCounter, ...update }).catch(() => {});
+      await appendStep({ messageId: '', stepNumber: stepCounter, ...update } as any).catch(() => {});
       emit({ type: 'step_done', stepNumber: stepCounter, update });
     },
 

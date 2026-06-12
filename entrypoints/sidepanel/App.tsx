@@ -21,8 +21,10 @@ export default function App() {
   const setStep = useAgentStore((s) => s.setStep);
   const setRunId = useAgentStore((s) => s.start);
   const appendText = useAgentStore((s) => s.appendText);
+  const appendReasoning = useAgentStore((s) => s.appendReasoning);
   const addStreamingToolCall = useAgentStore((s) => s.addStreamingToolCall);
   const accumulatedText = useAgentStore((s) => s.accumulatedText);
+  const accumulatedReasoning = useAgentStore((s) => s.accumulatedReasoning);
   const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
   const cancelRun = useAgentStore((s) => s.cancel);
   const finishRun = useAgentStore((s) => s.finish);
@@ -56,6 +58,8 @@ export default function App() {
   failRef.current = failRun;
   const appendTextRef = useRef(appendText);
   appendTextRef.current = appendText;
+  const appendReasoningRef = useRef(appendReasoning);
+  appendReasoningRef.current = appendReasoning;
   const addTcRef = useRef(addStreamingToolCall);
   addTcRef.current = addStreamingToolCall;
 
@@ -72,6 +76,9 @@ export default function App() {
         if (!c) return;
         if (c.type === 'text-delta' && typeof c.textDelta === 'string') {
           appendTextRef.current(c.textDelta);
+        } else if (c.type === 'reasoning' || c.type === 'reasoning-delta') {
+          const text = (c.textDelta as string) ?? (c.text as string) ?? '';
+          if (text) appendReasoningRef.current(text);
         } else if (c.type === 'tool-call' && c.toolCallId && c.toolName) {
           addTcRef.current({
             id: c.toolCallId as string,

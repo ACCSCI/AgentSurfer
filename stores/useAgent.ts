@@ -14,6 +14,8 @@ interface AgentState {
   // Only cleared on start/reset/finish. This prevents the "flash and disappear"
   // when a step completes and the live section resets.
   accumulatedText: string;
+  // Reasoning/thinking text from the model (separate from final text).
+  accumulatedReasoning: string;
   // Tool calls from the current in-progress step (before onStepFinish).
   // Cleared on setStep (step completed → tool calls are now in Dexie).
   liveToolCalls: ToolCall[];
@@ -25,6 +27,7 @@ interface AgentState {
   cancel: () => void;
   setStep: (step: StepUpdate) => void;
   appendText: (text: string) => void;
+  appendReasoning: (text: string) => void;
   addStreamingToolCall: (tc: ToolCall) => void;
   markTool: (toolCallId: string, status: 'pending' | 'ok' | 'error') => void;
   finish: (totalUsage?: { prompt: number; completion: number }) => void;
@@ -49,6 +52,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       isRunning: true,
       currentStep: null,
       accumulatedText: '',
+      accumulatedReasoning: '',
       liveToolCalls: [],
       runningTools: {},
       abortController: ac,
@@ -73,9 +77,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   appendText: (text) =>
     set((s) => ({
       accumulatedText: s.accumulatedText + text,
-      // New text arriving = new step started. Clear old live tool calls.
       liveToolCalls: [],
     })),
+
+  appendReasoning: (text) =>
+    set((s) => ({ accumulatedReasoning: s.accumulatedReasoning + text })),
 
   addStreamingToolCall: (tc) =>
     set((s) => ({ liveToolCalls: [...s.liveToolCalls, tc] })),
@@ -89,8 +95,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       abortController: null,
       currentStep: null,
       liveToolCalls: [],
-      // Keep accumulatedText — the user should see the full run, not
-      // just the final summary. Cleared only on reset() (new session).
     }),
 
   fail: (message) =>
@@ -109,6 +113,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       isRunning: false,
       currentStep: null,
       accumulatedText: '',
+      accumulatedReasoning: '',
       liveToolCalls: [],
       runningTools: {},
       abortController: null,

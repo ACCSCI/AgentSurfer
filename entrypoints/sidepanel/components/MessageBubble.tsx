@@ -10,12 +10,14 @@ export function MessageBubble({
   steps,
   isLive,
   liveText = '',
+  liveReasoning = '',
   liveToolCalls = [],
 }: {
   message: ChatMessage;
   steps: AgentStep[];
   isLive: boolean;
   liveText?: string;
+  liveReasoning?: string;
   liveToolCalls?: import('@/types/agent').ToolCall[];
 }) {
   const isUser = message.role === 'user';
@@ -23,10 +25,6 @@ export function MessageBubble({
     .filter((p) => p.type === 'text')
     .map((p) => p.text ?? '')
     .join('\n');
-  // During the run: show accumulated live text.
-  // After the run: show accumulated text (if non-empty) so the full
-  // thinking process is preserved. Only fall back to the Dexie message
-  // text if accumulatedText is empty (e.g. very old messages).
   const text = liveText || baseText;
 
   return (
@@ -40,6 +38,11 @@ export function MessageBubble({
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
       <div className="min-w-0 flex-1 space-y-1">
+        {liveReasoning && (
+          <div className="rounded-lg border border-dashed border-muted-foreground/30 bg-muted/30 px-3 py-2 text-xs italic text-muted-foreground whitespace-pre-wrap break-words">
+            💭 {liveReasoning}
+          </div>
+        )}
         {text && (
           <div
             className={cn(

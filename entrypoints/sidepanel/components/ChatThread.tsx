@@ -33,6 +33,7 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
 
   const currentStep = useAgentStore((s) => s.currentStep);
   const accumulatedText = useAgentStore((s) => s.accumulatedText);
+  const accumulatedReasoning = useAgentStore((s) => s.accumulatedReasoning);
   const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
   const error = useAgentStore((s) => s.error);
   const isRunning = useAgentStore((s) => s.isRunning);
@@ -62,6 +63,7 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
           steps={allStepsForSession.get(m.id) ?? []}
           isLive={isRunning && currentStep?.stepNumber != null && m.role === 'assistant'}
           liveText={m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? accumulatedText : ''}
+          liveReasoning={m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? accumulatedReasoning : ''}
           liveToolCalls={
             m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? liveToolCalls : []
           }

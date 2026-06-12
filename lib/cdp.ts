@@ -158,9 +158,10 @@ export class CDPService {
   private highlightVisible = false;
   private overlayEnabled = false;
 
-  /** Enable the Overlay domain (must be called before highlightQuad). */
+  /** Enable DOM + Overlay domains (must be called before highlightQuad). */
   async enableOverlay(): Promise<void> {
     if (this.overlayEnabled) return;
+    await this.send('DOM.enable');
     await this.send('Overlay.enable');
     this.overlayEnabled = true;
   }

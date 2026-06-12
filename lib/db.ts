@@ -196,11 +196,21 @@ export async function setActiveConfig(id: string): Promise<void> {
 
 import { ALL_TOOLS, type ToolName } from '@/types';
 
+// Default: CDP tools + smart screenshot + tabs enabled. Others disabled.
+const DEFAULT_ENABLED = new Set([
+  'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
+  'smartScreenshot',
+  'tabsList', 'tabsSwitch', 'tabsOpen',
+]);
+
 /** Initialize tool configs with defaults if table is empty. Call once at startup. */
 export async function initToolConfigs(): Promise<void> {
   const existing = await db.toolConfigs.toArray();
   if (existing.length >= ALL_TOOLS.length) return;
-  const defaults: ToolConfig[] = ALL_TOOLS.map((name) => ({ name, enabled: true }));
+  const defaults: ToolConfig[] = ALL_TOOLS.map((name) => ({
+    name,
+    enabled: DEFAULT_ENABLED.has(name),
+  }));
   await db.toolConfigs.bulkPut(defaults);
 }
 

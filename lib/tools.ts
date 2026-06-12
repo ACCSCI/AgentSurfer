@@ -452,10 +452,70 @@ export const cdpScreenshot = tool({
   ],
 });
 
+// ---------- CDP Aim / Confirm / Cancel (visual feedback loop) ----------
+
+export const cdpAim = tool({
+  description:
+    'Draw a red highlight square (crosshair) at viewport coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. This is the "pre-aim" step. After seeing the screenshot, decide if the position is correct. If it is, call cdpConfirm. If not, call cdpAim again with corrected coordinates. Do NOT call cdpClick directly — always use the aim→confirm flow.',
+  parameters: z.object({
+    x: z.number().int().min(0).describe('Viewport X coordinate to aim at'),
+    y: z.number().int().min(0).describe('Viewport Y coordinate to aim at'),
+    size: z.number().int().min(4).max(20).default(8).describe('Side length of the highlight square in pixels (default 8)'),
+  }),
+  execute: async ({ x, y, size }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
+    const tab = await getActiveTab();
+    await cdp.attach(tab.id);
+    await cdp.highlightQuad(x, y, size);
+    const dataUrl = await cdp.screenshot();
+    return { dataUrl, width: tab.width ?? 0, height: tab.height ?? 0, aimX: x, aimY: y };
+  },
+  experimental_toToolResultContent: (output) => [
+    { type: 'text', text: `Red crosshair drawn at (${output.aimX}, ${output.aimY}). Check the screenshot — is the red square on your target? If yes, call cdpConfirm(${output.aimX}, ${output.aimY}). If no, call cdpAim with corrected coordinates.` },
+    { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
+  ],
+});
+
+export const cdpConfirm = tool({
+  description:
+    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — never call cdpClick directly.',
+  parameters: z.object({
+    x: z.number().int().min(0).describe('Viewport X coordinate (must match the aimed position)'),
+    y: z.number().int().min(0).describe('Viewport Y coordinate (must match the aimed position)'),
+  }),
+  execute: async ({ x, y }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
+    const tab = await getActiveTab();
+    await cdp.attach(tab.id);
+    await cdp.clearHighlight();
+    await cdp.click(x, y);
+    return { ok: true, x, y };
+  },
+});
+
+export const cdpCancel = tool({
+  description:
+    'Clear the red crosshair without clicking. Use this if you decide NOT to click at the aimed position.',
+  parameters: z.object({}).strict(),
+  execute: async () => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
+    const tab = await getActiveTab();
+    await cdp.attach(tab.id);
+    await cdp.clearHighlight();
+    return { ok: true };
+  },
+});
+
 // ---------- Tool registry ----------
 
 export const allTools = {
-  // CDP-based native input (preferred).
+  // CDP native input + visual feedback.
+  cdpAim,
+  cdpConfirm,
+  cdpCancel,
   cdpClick,
   cdpType,
   cdpPressKey,

@@ -86,7 +86,14 @@ When a page just loaded or you need to detect changes, use smartScreenshot with 
   // Action rules
   if (has('domClick') && has('domType')) {
     sections.push(`ACT, DON'T NARRATE:
-After observing, your next response MUST be a tool call or the final answer. Never write "Let me click..." without calling the tool.`);
+After observing, your next response MUST be a tool call or the final answer. Never write "Let me click..." without calling the tool.
+
+CLICKING: ALWAYS use the aim→confirm flow:
+1. cdpAim(x, y) — draws a red crosshair at (x,y), returns a screenshot
+2. Look at the screenshot: is the red square on your target?
+3. If YES → cdpConfirm(x, y) — clears crosshair and clicks
+4. If NO → cdpAim(修正坐标) — redraw at correct position, re-screenshot, then confirm
+5. NEVER call cdpClick directly — always aim first, then confirm`);
   }
 
   if (has('pressKey')) {

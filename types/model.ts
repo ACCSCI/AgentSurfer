@@ -56,6 +56,9 @@ export const DefaultModelId: Record<Provider, string> = {
 // ---------- ToolConfig ----------
 
 export const ALL_TOOLS = [
+  'cdpAim',
+  'cdpConfirm',
+  'cdpCancel',
   'cdpClick',
   'cdpType',
   'cdpPressKey',

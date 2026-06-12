@@ -152,6 +152,42 @@ export class CDPService {
     const result = await this.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
     return `data:image/png;base64,${result.data}`;
   }
+
+  // ---------- Overlay (visual feedback) ----------
+
+  private highlightVisible = false;
+
+  /**
+   * Draw a highlight quad (small colored square) at (x, y) with the given
+   * side length. Uses CDP Overlay.highlightQuad — no DOM modification.
+   * The quad is centered on (x, y).
+   */
+  async highlightQuad(x: number, y: number, size = 6): Promise<void> {
+    const half = size / 2;
+    // Four corners of the square, centered on (x, y).
+    const quad = [
+      x - half, y - half, // top-left
+      x + half, y - half, // top-right
+      x + half, y + half, // bottom-right
+      x - half, y + half, // bottom-left
+    ];
+    await this.send('Overlay.highlightQuad', {
+      quad,
+      highlightConfig: {
+        fillColor: 'rgba(255, 0, 0, 0.6)',
+        borderColor: 'rgba(255, 0, 0, 1)',
+        borderWidth: 2,
+      },
+    });
+    this.highlightVisible = true;
+  }
+
+  /** Clear all overlay highlights. */
+  async clearHighlight(): Promise<void> {
+    if (!this.highlightVisible) return;
+    await this.send('Overlay.hideHighlight');
+    this.highlightVisible = false;
+  }
 }
 
 // ---------- Helpers ----------

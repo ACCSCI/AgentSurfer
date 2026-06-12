@@ -46,7 +46,7 @@ export function InputBar({
             isRunning ? 'Agent is running… (press Esc to cancel)' : 'Ask the agent to do something…'
           }
           rows={2}
-          className="min-h-[44px] flex-1 resize-none"
+          className="min-h-[44px] min-w-0 flex-1 resize-none"
           disabled={disabled}
         />
         {isRunning ? (
@@ -55,11 +55,18 @@ export function InputBar({
             variant="destructive"
             onClick={cancel}
             title="Cancel run"
+            className="shrink-0"
           >
             <Square className="h-4 w-4 fill-current" />
           </Button>
         ) : (
-          <Button size="icon" onClick={submit} disabled={disabled || !value.trim()} title="Send">
+          <Button
+            size="icon"
+            onClick={submit}
+            disabled={disabled || !value.trim()}
+            title="Send"
+            className="shrink-0"
+          >
             <Send className="h-4 w-4" />
           </Button>
         )}

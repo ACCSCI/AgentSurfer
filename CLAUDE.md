@@ -401,6 +401,41 @@ const sw = ctx.serviceWorkers().find(isOurs)
   ?? await ctx.waitForEvent('serviceworker', { predicate: isOurs, timeout: 20_000 });
 ```
 
+### 7.10 Visual servoing — the cdpAim closed-loop pattern (DON'T compute exact coordinates)
+
+Stop trying to derive `overlayX = a*reqX + b` formulas from DPR / viewport / layoutViewport / captureVisibleTab. That's a localization problem, and it's fragile across browsers.
+
+**Instead, treat cdpAim as a control problem** (visual servoing / gradient descent). The cdpAim tool already returns BEFORE + AFTER images so the LLM can OBSERVE the offset each round.
+
+**Two-phase pattern** (NEVER change BOTH x/y and size in the same step — mixing them makes the visual feedback ambiguous):
+
+```
+PHASE 1 — FIX POSITION (size locked at ~200):
+  aim(x, y, size=200)        # big box — as long as target is COVERED, position is close
+  compare BEFORE/AFTER
+  if off-target:
+    describe offset ("red box is right of target by ~100px")
+    cdpCancel + cdpAim(corrected_x, corrected_y, size=200)   # KEEP size=200
+  repeat until target is centered in box (3-4 rounds typical)
+
+PHASE 2 — SHRINK SIZE (position locked):
+  once centered, shrink size only: 200 → 100 → 50 → 20
+  verify at each step that target is still fully covered
+
+PHASE 3 — CONFIRM:
+  cdpConfirm(x, y)
+```
+
+**Why this is the right approach:**
+- Doesn't depend on DPR / viewport / captureVisibleTab internals — those can change between Chrome versions
+- Self-corrects: the LLM observes the actual offset and adjusts
+- The LLM expresses offsets in natural language ("偏左 100 像素"), not exact coordinates
+- Each phase has one variable, making the visual feedback unambiguous
+
+**System prompt and tool description** (`lib/agent.ts` and `lib/tools.ts`) MUST enforce this. If they don't, the LLM will try to one-shot the aim with a small box and fail.
+
+**Verified empirically:** the 32-visual-servoing test shows the LLM executing exactly this pattern (sizes `[200, 200, 100, 50]`, two-phase, position locked in phase 1, size locked in phase 2).
+
 ---
 
 ## 8. Future Work (not yet started)

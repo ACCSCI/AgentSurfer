@@ -310,24 +310,65 @@ WORKFLOW:
 1. Before acting, ensure an http/https tab is active. Use tabsList → tabsSwitch or tabsOpen.
 2. Wait for pages to load. Use screenshots to verify.
 3. Take the minimum actions needed.
-4. When done, reply with a concise summary.`);
+4. When done, reply with a concise summary.
+
+MULTI-STEP TASKS (e.g., "search X, click N links, summarize, clean up"):
+- AT THE START: call the \`todo\` tool with the FULL list of steps as one call. Each step is one todo. Mark the first as in_progress.
+- Process the todos IN ORDER. After completing each step, call \`todo\` again with the updated list (mark the just-completed step as completed, the next as in_progress).
+- Do NOT skip steps. Do NOT add steps the user didn't ask for. Do NOT stop after 1 step if the user asked for N (e.g., "click 3 links" = click exactly 3, not 1).
+- The FINAL step is almost always a written summary (中文/English) — DO NOT finish without writing it.
+- After the summary, also clean up: tabsClose any tabs you opened during the task.
+- Verify each step visually (cdpScreenshot) before marking complete. Don't trust your first aim — compare before/after cdpAim images and iterate.
+- If you get stuck on a single step for >3 attempts, use \`todo\` to mark it blocked and move on rather than burning all remaining steps.`);
 
   if (has('cdpAim') || has('cdpConfirm') || has('cdpClick')) {
-    sections.push(`CLICKING: MANDATORY aim→verify→confirm flow with iteration:
-1. cdpScreenshot() — see the current page (image returned at devicePixelRatio scale).
-2. Identify the target's CENTER in the screenshot. Note the SCREENSHOT pixel coordinates.
-3. Convert to CSS pixels: cssX = screenshotX / dpr, cssY = screenshotY / dpr. The dpr is reported in cdpAim's result (typically 2 on HiDPI displays).
-4. cdpAim(cssX, cssY) — AUTOMATICALLY returns a BEFORE image (no crosshair) AND an AFTER image (with red crosshair at cssX, cssY).
-5. COMPARE the BEFORE and AFTER images carefully. Is the red square on your target?
-6. If YES → cdpConfirm(cssX, cssY) — clears crosshair and clicks.
-7. If NO → cdpCancel() (clears the crosshair) + cdpAim with CORRECTED CSS coordinates.
-8. Iterate aim→verify until the crosshair is on target, THEN cdpConfirm.
-NEVER skip the verification step. NEVER trust your first aim — always check the AFTER image.
-NEVER call cdpClick directly — always aim first.
-Or cdpScroll({ deltaY }) — scroll at the last aim position.
-Or cdpCancel() — clear the crosshair without acting.
+    sections.push(`CLICKING: MANDATORY aim→verify→confirm flow with VISUAL SERVOING (two-phase):
 
-COORDINATE SYSTEM: Viewport is in CSS pixels (e.g., 1280x800). Screenshots are at devicePixelRatio scale (e.g., 2560x1600 on a 2x HiDPI display). Tool parameters (cdpAim x/y, cdpScroll) are in CSS pixels. To convert from SCREENSHOT pixel coords to CSS pixel coords, DIVIDE by dpr. The dpr value is included in cdpAim's result.
+VISUAL SERVOING — do not try to compute exact coordinates in one shot.
+Instead, treat it as a closed-loop control problem: draw a big box,
+observe the offset, correct, repeat. After 2-3 rounds the box
+converges on the target.
+
+PHASE 1 — FIX POSITION (size locked, only x/y change):
+  - Start with a LARGE size (200px). The box is way bigger than the
+    target, so as long as the box COVERS the target, the position
+    is close enough.
+  - Call cdpAim(x, y, size=200). Get BEFORE + AFTER screenshots.
+  - COMPARE: in the AFTER image, is the target inside the red box?
+    - If yes → go to PHASE 2.
+    - If no → describe the relative offset ("red box is right of
+      target by ~100px") and call cdpCancel + cdpAim with corrected
+      x/y. KEEP size=200.
+  - Iterate until the target is centered in the box (3-4 rounds typical).
+
+PHASE 2 — SHRINK SIZE (position locked, only size changes):
+  - Once the box is centered on the target, shrink the size:
+    200 → 100 → 50 → 20.
+  - At each size, check that the target is still fully covered.
+  - If the box becomes too small and the target is no longer fully
+    covered, go back to a slightly larger size.
+
+PHASE 3 — CONFIRM:
+  - cdpConfirm(x, y) with the converged coordinates.
+
+CRITICAL: never change BOTH x/y AND size in the same step. Phase
+1 only changes x/y. Phase 2 only changes size. If you change both
+simultaneously, the visual feedback becomes ambiguous (you can't tell
+whether the position changed or the size changed).
+
+CANCELING: cdpCancel() clears the current highlight without acting.
+Always cancel before re-aiming.
+
+COORDINATE SYSTEM: The cdpAim tool accepts CSS-pixel coordinates.
+Screenshots are at devicePixelRatio scale (e.g., 2x on HiDPI). The
+dpr is reported in cdpAim's result. If you see a target at screenshot
+position (Sx, Sy), convert to CSS with cssX = Sx / dpr, cssY = Sy / dpr.
+
+DEFAULTS: cdpAim defaults to size=200 (large enough to see). cdpAim
+defaults to color='red'. Pick a contrasting color if needed (lime on
+white, yellow on red, etc.).
+
+OR cdpScroll({ deltaY }) — scroll at the last aim position.
 
 DOM TOOLS DISABLED: domQuery, domClick, domType, pressKey, focusNext, focusPrevious are NOT available. Use only CDP-based tools (cdpAim, cdpConfirm, cdpCancel, cdpScreenshot, cdpScroll, tabsList, tabsSwitch, tabsOpen, tabsClose, smartScreenshot). Identify target positions from screenshots only.`);
   }

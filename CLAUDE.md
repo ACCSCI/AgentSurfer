@@ -271,6 +271,31 @@ These are the violations identified by the architecture audit. They are the next
 
 **Fix:** Compute dpr from the actual screenshot dimensions vs the tab's CSS viewport: `dpr = screenshotWidth / tab.width`. Return the dpr in the tool result so the LLM knows the conversion factor. See §7.6.
 
+### P0.10: SW register race causes "manifest missing" dialog + about:blank — ✅ FIXED
+
+**Where:** `e2e/fixtures/extension.ts` (launchWithExtension)
+
+**Symptom chain (one root cause, many faces):**
+1. `ctx.waitForEvent('serviceworker', { timeout: 20_000 })` times out
+2. Side panel never opens — user sees only `about:blank`
+3. Chrome shows an error dialog: "无法加载以下来源的扩展程序: ...清单文件缺失或不可读取"
+4. Test reports failure, user thinks it's a path/build issue
+
+The **dialog is a symptom, not the cause.** Chrome loads the extension early; when the SW registration event races past Playwright's listener, the test never confirms the extension is live. Chrome then mis-reports the half-loaded state as "manifest missing".
+
+**Root cause:** Playwright attaches its `serviceworker` event listener AFTER Chrome has already registered the SW. The `waitForEvent` timeout fires 20s later; the event was missed.
+
+**Why the "manifest missing" path looks wrong on Windows:** the file dialog hides the leading `.` in `.output`, so the displayed path `output\chrome-mv3` looks missing — but the actual file is at `.output\chrome-mv3\manifest.json` and is valid.
+
+**Fix:**
+1. `ctx.serviceWorkers().find(isOurSw)` first — catches SWs registered before Playwright's listener
+2. Fall back to `ctx.waitForEvent('serviceworker', { predicate: isOurSw, ... })` with a regex that only accepts `/background.js$/`
+3. Add a pre-flight `existsSync(EXTENSION_PATH + '/manifest.json')` check that throws FAST with the actual path + CWD if the build is broken
+
+**Verify:** after the fix, 5/5 Playwright runs complete cleanly in ~8s with the side panel + Bing + red crosshair all visible. No dialog.
+
+**Rule:** Whenever a Chrome extension E2E shows "manifest missing" + about:blank + flaky pass rate, suspect the SW register race FIRST — don't go down the path/build debugging rabbit hole.
+
 ---
 
 ## 7. Lessons Learned (UI + E2E patterns — read before touching these areas)
@@ -338,6 +363,43 @@ Fix:
 2. State explicitly in the system prompt: "To convert screenshot pixels to CSS pixels, divide by dpr. Tool parameters are CSS pixels."
 3. Force a verify-cancel-re-aim loop: cdpAim returns BEFORE + AFTER images; system prompt says "COMPARE them. If off-target, cdpCancel + cdpAim with corrected coordinates. Iterate until accurate."
 4. Observed convergence: 3 aim rounds brought the LLM from ~200 px off to ~18 px off the search box center.
+
+### 7.8 Chrome E2E: the "manifest missing" dialog is almost always an SW register race, not a build issue
+
+When a Playwright-based E2E for a Chrome extension shows:
+- A Windows error dialog: "无法加载以下来源的扩展程序: ...清单文件缺失或不可读取"
+- The browser showing only `about:blank` (no side panel, no target tab)
+- Flaky pass rate — sometimes works, sometimes doesn't
+
+**The actual cause is usually a SW register race**, not a missing manifest. Playwright attaches its `serviceworker` event listener AFTER Chrome has registered the SW; `ctx.waitForEvent('serviceworker', { timeout: 20_000 })` then times out. The dialog appears because Chrome half-loaded the extension.
+
+**The Windows cosmetic twist:** the file dialog hides the leading `.` in `.output`, so the displayed path `output\chrome-mv3` looks missing. But the actual file is at `.output\chrome-mv3` and is valid.
+
+**Don't go down the path/build debugging rabbit hole.** Instead:
+
+1. **Add a pre-flight check** at fixture startup: `existsSync(EXTENSION_PATH + '/manifest.json')` and `JSON.parse(...)`. Throws with the actual path + CWD if anything is wrong. Catches real build issues FAST.
+
+2. **Use predicate-filtered SW register** to be race-safe AND reject other extensions' SWs:
+   ```ts
+   const isOurSw = (w) => /\/background\.js$/.test(w.url());
+   const sw = ctx.serviceWorkers().find(isOurSw)
+     ?? await ctx.waitForEvent('serviceworker', { predicate: isOurSw, timeout: 20_000 });
+   ```
+
+3. **Add a startup trace** (`e2e/fixtures/trace.ts`) with timestamped markers for each await boundary. When a test fails, the trace log shows exactly which await it was stuck at. 90% of "about:blank hang" failures are an await that never returns.
+
+### 7.9 Use Playwright `predicate` to filter events to exactly what you want
+
+`ctx.waitForEvent('serviceworker', { predicate: w => w.url().endsWith('/background.js') })` only matches your extension's SW, not any other extension's or Chrome's internal SW. Without predicate, `waitForEvent` accepts any matching event. The predicate pattern is also race-safe because if the event has already fired, `ctx.serviceWorkers()` has it.
+
+Pattern for race-safe + filtered registration:
+```ts
+// 1. poll already-registered (handles "event fired before listener attached")
+// 2. fall back to waitForEvent with predicate (handles "event hasn't fired yet")
+const isOurs = (w) => /\/background\.js$/.test(w.url());
+const sw = ctx.serviceWorkers().find(isOurs)
+  ?? await ctx.waitForEvent('serviceworker', { predicate: isOurs, timeout: 20_000 });
+```
 
 ---
 

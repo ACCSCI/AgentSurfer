@@ -79,6 +79,13 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   // missing" in a Windows file dialog (which hides the leading dot and
   // makes the error look like a path bug instead of a build issue).
   const manifestPath = path.join(EXTENSION_PATH, 'manifest.json');
+  // Loud diagnostic: print the actual path the test is using. This
+  // makes it obvious in the test output whether Chrome is loading
+  // from the right place, even if the Windows file dialog hides
+  // the leading dot.
+  console.log(`[fixture] EXTENSION_PATH = ${EXTENSION_PATH}`);
+  console.log(`[fixture] manifest.json  = ${manifestPath}`);
+  console.log(`[fixture] manifest exists = ${existsSync(manifestPath)}`);
   if (!existsSync(manifestPath)) {
     throw new Error(
       `Extension manifest missing at ${manifestPath}\n` +

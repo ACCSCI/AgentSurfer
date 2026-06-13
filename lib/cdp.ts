@@ -68,6 +68,12 @@ export class CDPService {
     }
     this.attached = false;
     this.tabId = null;
+    // CRITICAL: reset overlay/DOM state. When we re-attach to a different
+    // tab, the new tab has not had DOM.enable / Overlay.enable called —
+    // the old flag is stale. `highlightQuad` skips the enable call when
+    // `overlayEnabled` is true, which causes "Overlay must be enabled
+    // before a tool can be shown" (-32600) on cross-tab aim flows.
+    this.overlayEnabled = false;
   }
 
   get isAttached(): boolean {

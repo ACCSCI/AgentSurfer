@@ -14,6 +14,14 @@ import { ChatThread } from './components/ChatThread';
 import { InputBar } from './components/InputBar';
 import { ModelBadge } from './components/ModelBadge';
 import { Sidebar } from './components/Sidebar';
+import { installSmartScreenshotHandler } from './smart-screenshot';
+
+// Register the smart-screenshot message listener at module load (must be
+// synchronous per MV3 §2.5 — listeners only fire if registered at top
+// level when the page loaded). Without this, the SW's `__smart-screenshot:
+// execute` messages have no handler and the tool returns "side panel not
+// available or unresponsive."
+installSmartScreenshotHandler();
 
 export default function App() {
   // Re-sync Zustand active config when SW writes to modelConfigs.

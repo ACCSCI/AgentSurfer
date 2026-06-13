@@ -21,7 +21,7 @@ import { launchWithExtension } from '../fixtures/extension';
 const FULL_TOOLS = [
   'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
   'smartScreenshot',
-  'cdpAim', 'cdpConfirm', 'cdpCancel', 'cdpScreenshot',
+  'cdpAim', 'cdpConfirm', 'cdpCancel', 'cdpScreenshot', 'cdpScroll',
   'cdpType', 'cdpPressKey',
 ] as const;
 

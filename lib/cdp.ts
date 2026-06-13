@@ -68,12 +68,10 @@ export class CDPService {
     }
     this.attached = false;
     this.tabId = null;
-    // CRITICAL: reset overlay/DOM state. When we re-attach to a different
-    // tab, the new tab has not had DOM.enable / Overlay.enable called —
-    // the old flag is stale. `highlightQuad` skips the enable call when
-    // `overlayEnabled` is true, which causes "Overlay must be enabled
-    // before a tool can be shown" (-32600) on cross-tab aim flows.
-    this.overlayEnabled = false;
+    // Reset highlight flag — when we re-attach to a different tab, the
+    // DOM element we injected is gone (it's per-tab). Don't think a
+    // highlight is still visible.
+    this.highlightVisible = false;
   }
 
   get isAttached(): boolean {
@@ -192,25 +190,56 @@ export class CDPService {
     });
   }
 
+  /**
+   * Capture the active tab's current viewport as a PNG dataUrl.
+   *
+   * IMPORTANT: We use the extension's native `chrome.tabs.captureVisibleTab`
+   * rather than CDP's `Page.captureScreenshot` because:
+   *   - `Page.captureScreenshot` captures only the page's rendered surface
+   *     and EXCLUDES the DevTools overlay (so `Overlay.highlightQuad` would
+   *     be invisible in the returned image — both to the LLM and the user).
+   *   - `chrome.tabs.captureVisibleTab` captures the entire visible viewport
+   *     including the DevTools overlay layer, so the red crosshair from
+   *     `highlightQuad` IS visible in the dataUrl.
+   *
+   * Side effects:
+   *   - Requires the tab to be the active tab in its window
+   *     (call `tabsSwitch` or focus it first).
+   *   - The user can also see the crosshair in their browser.
+   *   - PNG dimensions come from the IHDR header. dpr = screenshotWidth / tab.width.
+   */
   async screenshot(): Promise<{ dataUrl: string; width: number; height: number }> {
     log.info('cdp', 'screenshot', { runId: this.runId });
-    const result = await this.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
-    // Parse PNG IHDR to get real pixel dimensions. `window.devicePixelRatio`
-    // is unreliable in Playwright/headless Chrome — it can return 1 even when
-    // the screenshot is 2x. The PNG header is the source of truth.
-    // Note: SW context has no `Buffer` global, so use atob + DataView.
-    // PNG signature: 8 bytes. IHDR: 4 (length) + 4 (type) + 4 (width) + 4 (height) + ...
-    const binary = atob(result.data);
+    if (this.tabId == null) {
+      throw new Error('cdp.screenshot: no active tab — call attach() first');
+    }
+    const tab = await chrome.tabs.get(this.tabId);
+    if (tab.windowId == null) {
+      throw new Error('cdp.screenshot: tab has no windowId');
+    }
+    // chrome.tabs.captureVisibleTab requires the captured tab to be the
+    // ACTIVE tab in its window. If the user has another tab focused in
+    // the same window, the call throws "Tab cannot be captured".
+    // We activate the target tab first, then capture.
+    if (!tab.active) {
+      await chrome.tabs.update(this.tabId, { active: true });
+      // Tiny wait for the swap to settle (rendering layer has to update).
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    // dataUrl is "data:image/png;base64,<base64>" — strip the prefix.
+    const base64 = dataUrl.startsWith('data:image/png;base64,')
+      ? dataUrl.slice('data:image/png;base64,'.length)
+      : dataUrl;
+    // Parse PNG IHDR to get real pixel dimensions (dpr-aware).
+    // SW has no `Buffer` — use atob + Uint8Array + DataView.
+    const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const view = new DataView(bytes.buffer);
     const width = view.getUint32(16, false);
     const height = view.getUint32(20, false);
-    return {
-      dataUrl: `data:image/png;base64,${result.data}`,
-      width,
-      height,
-    };
+    return { dataUrl, width, height };
   }
 
   private lastAimPos: { x: number; y: number } = { x: 0, y: 0 };
@@ -219,30 +248,92 @@ export class CDPService {
   get aimX(): number { return this.lastAimPos.x; }
   get aimY(): number { return this.lastAimPos.y; }
 
-  // ---------- Overlay (visual feedback) ----------
+  // ---------- Visual feedback (CDP Overlay, with LLM-chosen color) ----------
+  //
+  // We use CDP `Overlay.highlightQuad` which draws on Chrome's overlay
+  // layer. NO DOM INJECTION — the page stays 100% clean.
+  //
+  // CRITICAL: The Overlay domain is LAZY by default. We MUST explicitly
+  // call `Overlay.enable` before `Overlay.highlightQuad` — otherwise
+  // Chrome (to save GPU work) refuses to render the highlight in
+  // normal browsing mode. With `Overlay.enable` called, the highlight
+  // is visible in the user's browser AND captured by
+  // `chrome.tabs.captureVisibleTab` (which is what the screenshot tool
+  // uses).
+  //
+  // The LLM picks the color (CSS name or #rrggbb) so the crosshair
+  // contrasts with the page background. We always draw a WHITE outline
+  // around the colored fill so the highlight stays visible on any
+  // background (including pages with red/pink themes).
 
   private highlightVisible = false;
   private overlayEnabled = false;
 
-  /** Enable DOM + Overlay domains (must be called before highlightQuad). */
+  /**
+   * Enable the Overlay domain. Must be called before highlightQuad
+   * for the highlight to actually render in normal browsing mode.
+   *
+   * CRITICAL: `Overlay.enable` REQUIRES `DOM.enable` to be called first
+   * (Chrome DevTools Protocol order: DOM domain is the dependency).
+   * Calling `Overlay.enable` alone returns -32000 "DOM should be
+   * enabled first" and the highlight is silently dropped.
+   */
   async enableOverlay(): Promise<void> {
     if (this.overlayEnabled) return;
+    log.info('cdp', 'Overlay.enable (incl DOM.enable)', { runId: this.runId, tabId: this.tabId });
     await this.send('DOM.enable');
     await this.send('Overlay.enable');
     this.overlayEnabled = true;
   }
 
+  /** Parse a CSS color name or #rrggbb into {r,g,b,a}. Throws on invalid input. */
+  private parseColor(color: string): { r: number; g: number; b: number } {
+    const c = color.trim().toLowerCase();
+    const named: Record<string, [number, number, number]> = {
+      red: [255, 0, 0],
+      green: [0, 200, 0],
+      blue: [0, 100, 255],
+      yellow: [255, 255, 0],
+      cyan: [0, 255, 255],
+      magenta: [255, 0, 255],
+      white: [255, 255, 255],
+      black: [0, 0, 0],
+      orange: [255, 165, 0],
+      purple: [160, 32, 240],
+      lime: [0, 255, 0],
+      pink: [255, 105, 180],
+    };
+    if (c in named) {
+      const [r, g, b] = named[c]!;
+      return { r, g, b };
+    }
+    const hex = c.match(/^#([0-9a-f]{6})$/);
+    if (hex) {
+      const v = parseInt(hex[1]!, 16);
+      return { r: (v >> 16) & 0xff, g: (v >> 8) & 0xff, b: v & 0xff };
+    }
+    throw new Error(`Invalid color "${color}" — use a CSS name (red/blue/lime/...) or #rrggbb`);
+  }
+
   /**
-   * Draw a highlight quad (small colored square) at (x, y) with the given
-   * side length. Uses CDP Overlay.highlightQuad — no DOM modification.
-   * The quad is centered on (x, y).
+   * Draw a colored square at viewport (x, y) with side length `size`.
+   * The square is filled with the LLM-chosen color and outlined in
+   * WHITE (so it's always visible regardless of page background).
+   * Coordinates are CSS pixels (in viewport coordinate space).
    */
-  async highlightQuad(x: number, y: number, size = 6): Promise<void> {
-    log.info('cdp', 'highlightQuad', { runId: this.runId, x, y, size });
+  async highlightQuad(
+    x: number, y: number, size = 80,
+    color: string = 'red',
+  ): Promise<void> {
+    log.info('cdp', 'highlightQuad', { runId: this.runId, x, y, size, color });
     this.lastAimPos = { x, y };
+    // Enable the overlay domain first — without this, the highlight
+    // is NOT rendered in normal browsing mode (Chrome optimizes away
+    // the overlay layer until something explicitly enables it).
     await this.enableOverlay();
+    const { r, g, b } = this.parseColor(color);
     const half = size / 2;
-    // Four corners of the square, centered on (x, y).
+    // 4 corners, clockwise from top-left, in CSS pixels.
     const quad = [
       x - half, y - half, // top-left
       x + half, y - half, // top-right
@@ -251,18 +342,20 @@ export class CDPService {
     ];
     await this.send('Overlay.highlightQuad', {
       quad,
-      color: { r: 255, g: 0, b: 0, a: 0.5 },
-      outlineColor: { r: 255, g: 0, b: 0, a: 1 },
+      color: { r, g, b, a: 0.5 },                // 50% transparent fill
+      outlineColor: { r: 255, g: 255, b: 255, a: 1 }, // WHITE outline for contrast
     });
     this.highlightVisible = true;
   }
 
-  /** Clear all overlay highlights. */
+  /** Clear the highlight. Also disables the Overlay domain to release GPU resources. */
   async clearHighlight(): Promise<void> {
-    if (!this.highlightVisible) return;
+    if (!this.highlightVisible && !this.overlayEnabled) return;
     log.info('cdp', 'clearHighlight', { runId: this.runId });
-    await this.send('Overlay.hideHighlight');
+    try { await this.send('Overlay.hideHighlight'); } catch { /* ignore */ }
+    try { await this.send('Overlay.disable'); } catch { /* ignore */ }
     this.highlightVisible = false;
+    this.overlayEnabled = false;
   }
 }
 

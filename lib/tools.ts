@@ -559,13 +559,14 @@ export const cdpScreenshot = tool({
 
 export const cdpAim = tool({
   description:
-    'Draw a red highlight square (crosshair) at viewport coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. This tool AUTOMATICALLY captures a BEFORE screenshot (no crosshair) AND an AFTER screenshot (with crosshair drawn) so you can compare them and decide if the position is correct. If the crosshair is ON target, call cdpConfirm(x, y). If NOT, call cdpCancel() then call cdpAim again with corrected coordinates. MANDATORY verification loop: aim → compare before/after → if off-target, cancel and re-aim → repeat until on target, THEN cdpConfirm. Do NOT call cdpClick directly — always use the aim→confirm flow.',
+    'Draw a colored highlight square (crosshair) at viewport coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. This tool AUTOMATICALLY captures a BEFORE screenshot (no crosshair) AND an AFTER screenshot (with crosshair drawn) so you can compare them and decide if the position is correct. If the crosshair is ON target, call cdpConfirm(x, y). If NOT, call cdpCancel() then call cdpAim again with corrected coordinates. MANDATORY verification loop: aim → compare before/after → if off-target, cancel and re-aim → repeat until on target, THEN cdpConfirm. Do NOT call cdpClick directly — always use the aim→confirm flow.\n\nCOLOR: pick a color that CONTRASTS with the page background (e.g., red on white, cyan/yellow on dark pages, green on red pages). Defaults to red. CSS names (red/blue/lime/cyan/yellow/magenta/orange/purple/white/black) or #rrggbb.',
   parameters: z.object({
     x: z.number().int().min(0).describe('Viewport X coordinate to aim at (CSS pixels — see coordinate system notes)'),
     y: z.number().int().min(0).describe('Viewport Y coordinate to aim at (CSS pixels — see coordinate system notes)'),
-    size: z.number().int().min(4).max(20).default(8).describe('Side length of the highlight square in pixels (default 8)'),
+    size: z.number().int().min(8).max(400).default(80).describe('Side length of the highlight square in CSS pixels. DEFAULT 80 — must be large enough to see (8px is invisible on HiDPI).'),
+    color: z.string().default('red').describe('CSS color name (red/blue/lime/cyan/yellow/orange/purple/white/black) or #rrggbb. Pick a color contrasting the page background.'),
   }),
-  execute: async ({ x, y, size }) => {
+  execute: async ({ x, y, size, color }) => {
     const cdp = getCurrentCDP();
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
@@ -573,7 +574,7 @@ export const cdpAim = tool({
     // Pre-screenshot BEFORE drawing the crosshair so the LLM can compare
     // before/after and verify the crosshair actually landed where it asked.
     const before = await cdp.screenshot();
-    await cdp.highlightQuad(x, y, size);
+    await cdp.highlightQuad(x, y, size, color);
     const after = await cdp.screenshot();
     // Compute DPR from the ACTUAL screenshot dimensions vs the tab's CSS
     // viewport dimensions. `window.devicePixelRatio` is unreliable in
@@ -590,6 +591,7 @@ export const cdpAim = tool({
       dpr,                              // device pixels per CSS pixel
       aimX: x,
       aimY: y,
+      color,
     };
   },
   experimental_toToolResultContent: (output: {

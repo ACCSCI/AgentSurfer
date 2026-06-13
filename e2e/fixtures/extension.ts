@@ -120,16 +120,54 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   const swUrl = new URL(sw.url());
   const extId = swUrl.host;
 
-  function openSidePanel() {
-    const url = `chrome-extension://${extId}/sidepanel.html`;
-    return ctx.newPage().then(async (page) => {
-      page.on('console', (msg) => {
-        const t = msg.text();
-        if (t.includes('[AgentSurfer]')) console.log(`[SP:console]`, t);
-      });
-      await page.goto(url);
-      return { page, url };
+  // Open the side panel IMMEDIATELY (right after SW is ready) so the
+  // user never sees the "only about:blank" initial state. Retry up to
+  // 3× since chrome-extension:// navigation is occasionally flaky in
+  // Playwright headless (the page can end up stuck at about:blank).
+  const sidePanelUrl = `chrome-extension://${extId}/sidepanel.html`;
+  let sidePanel: Awaited<ReturnType<typeof openSidePanelOnce>>['page'] | null = null;
+  async function openSidePanelOnce() {
+    const page = await ctx.newPage();
+    page.on('console', (msg) => {
+      const t = msg.text();
+      if (t.includes('[AgentSurfer]')) console.log(`[SP:console]`, t);
     });
+    page.on('pageerror', (err) => {
+      console.log(`[SP:pageerror]`, err.message);
+    });
+    await page.goto(sidePanelUrl);
+    return { page, url: page.url() };
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await openSidePanelOnce();
+      // Verify the navigation actually landed on the extension URL.
+      // If page.url() is still about:blank, the goto failed silently.
+      if (r.url.startsWith('chrome-extension://')) {
+        sidePanel = r.page;
+        break;
+      }
+      console.log(`[fixture] side panel goto returned URL ${r.url}, retrying (attempt ${attempt}/3)`);
+      await r.page.close().catch(() => {});
+    } catch (err) {
+      console.log(`[fixture] side panel goto threw: ${err instanceof Error ? err.message : err} (attempt ${attempt}/3)`);
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!sidePanel) throw new Error('Side panel failed to load after 3 attempts. Check SW registration.');
+
+  // Wait for the React app to mount (look for the AgentSurfer heading).
+  try {
+    await sidePanel.waitForSelector('text=AgentSurfer', { timeout: 10_000 });
+  } catch {
+    // Best-effort. Test code can wait again if needed.
+  }
+
+  function openSidePanel() {
+    // The side panel is already open. Return the existing one (don't
+    // create a duplicate tab). Tests that previously called this
+    // expecting a fresh page will keep working — they get the same page.
+    return Promise.resolve({ page: sidePanel!, url: sidePanel!.url() });
   }
 
   function openOptions() {

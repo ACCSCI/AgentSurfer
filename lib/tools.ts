@@ -6,12 +6,65 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 
+// ---------- Safe-execute wrapper ----------
+//
+// Architecture rule (user-clarified 2026-06-13): tool errors are
+// OBSERVATIONS, not termination conditions. The agent loop must continue
+// after a tool throws so the LLM can recover (retry, try a different
+// approach, etc.). The only valid termination signals are:
+//   - user cancel (AbortController)
+//   - max steps reached
+//   - fatal system error (network, provider 5xx)
+//   - LLM signals completion
+//
+// Implementation: wrap each tool's `execute` so thrown errors become a
+// regular tool result of shape `{ error: string }`. The AI SDK will pass
+// this to the LLM as a tool result on the next step. The LLM sees the
+// error and can decide what to do — the loop does NOT terminate.
+//
+// Content renderers (`experimental_toToolResultContent`) get the error
+// shape and return a text-only content block explaining the failure.
+
+type AnyTool = {
+  description?: string;
+  parameters?: unknown;
+  execute?: (...args: unknown[]) => Promise<unknown>;
+  experimental_toToolResultContent?: (output: unknown) => unknown;
+};
+
+function safeExecute<T extends AnyTool>(t: T): T {
+  if (!t.execute) return t;
+  const orig = t.execute;
+  const origContent = t.experimental_toToolResultContent;
+  return {
+    ...t,
+    execute: (async (...args: unknown[]) => {
+      try {
+        return await orig(...args);
+      } catch (err) {
+        // Return as an observation so the AI SDK loop continues.
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }) as T['execute'],
+    experimental_toToolResultContent: origContent
+      ? ((output: unknown) => {
+          if (output && typeof output === 'object' && 'error' in (output as Record<string, unknown>)) {
+            return [
+              { type: 'text', text: `Tool error: ${(output as { error: string }).error}` },
+            ];
+          }
+          return origContent(output);
+        }) as T['experimental_toToolResultContent']
+      : undefined,
+  };
+}
+
 // ---------- Helpers ----------
 
-async function getActiveTab(): Promise<chrome.tabs.Tab> {
+async function getActiveTab(): Promise<chrome.tabs.Tab & { id: number }> {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id) throw new Error('No active tab');
-  return tab;
+  return tab as chrome.tabs.Tab & { id: number };
 }
 
 async function runOnActiveTab<T>(func: () => T | Promise<T>): Promise<T> {
@@ -26,6 +79,37 @@ async function runOnActiveTab<T>(func: () => T | Promise<T>): Promise<T> {
 }
 
 // ---------- Tools ----------
+
+/**
+ * todo — lets the agent maintain a visible plan. The LLM calls this with
+ * the full list of todos (not a diff) so the UI can render it cleanly.
+ * Status: 'pending' | 'in_progress' | 'completed'.
+ * Exactly one todo should be in_progress at a time.
+ */
+export const createTodoTool = (
+  emit: (event: { type: string; [k: string]: unknown }) => void,
+) =>
+  tool({
+    description:
+      'Update the agent\'s todo list. Pass the FULL list each time (not a diff). ' +
+      'Use this to plan multi-step work: mark one todo in_progress at a time, ' +
+      'and mark completed when done. The UI will display the list to the user.',
+    parameters: z.object({
+      todos: z.array(
+        z.object({
+          content: z.string().min(1).describe('Short description of the step'),
+          status: z.enum(['pending', 'in_progress', 'completed']),
+          activeForm: z.string().min(1).describe('Present-continuous form, e.g. "Clicking the submit button"'),
+        }),
+      ).min(1).max(20),
+    }),
+    execute: async ({ todos }) => {
+      // Emit a distinct event type for todos (architecture rule 7).
+      emit({ type: 'todo_update', todos });
+      // Echo back the list as the tool result so the LLM sees the current state.
+      return { todos };
+    },
+  });
 
 export const domQuery = tool({
   description:
@@ -136,17 +220,13 @@ export const screenshot = tool({
   // AI SDK v4: convert the dataURL result into a multi-modal content array
   // so the model actually sees the image. The text caption helps the model
   // know what it's looking at.
-  experimental_toToolResultContent: (output) => [
-    {
-      type: 'text',
-      text: `Screenshot captured (${output.width}x${output.height}px).`,
-    },
-    {
-      type: 'image',
-      data: output.dataUrl,
-      mimeType: 'image/png',
-    },
-  ],
+  experimental_toToolResultContent: (output: { dataUrl?: string; width?: number; height?: number; error?: string }) => {
+    if (!output.dataUrl) return [{ type: 'text', text: output.error ?? 'Screenshot failed' }];
+    return [
+      { type: 'text', text: `Screenshot captured (${output.width ?? 0}x${output.height ?? 0}px).` },
+      { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
+    ];
+  },
 });
 
 // ---------- Tab management ----------
@@ -455,23 +535,34 @@ export const cdpScreenshot = tool({
       return { error: `Cannot capture non-http URL (${tab.url || 'empty'}).` };
     }
     await cdp.attach(tab.id);
-    const dataUrl = await cdp.screenshot();
-    return { dataUrl, width: tab.width ?? 0, height: tab.height ?? 0 };
+    const shot = await cdp.screenshot();
+    const dpr = tab.width ? shot.width / tab.width : 1;
+    return {
+      dataUrl: shot.dataUrl,
+      width: tab.width ?? 0,
+      height: tab.height ?? 0,
+      screenshotWidth: shot.width,
+      screenshotHeight: shot.height,
+      dpr,
+    };
   },
-  experimental_toToolResultContent: (output) => [
-    { type: 'text', text: `Screenshot captured (${output.width}x${output.height}px).` },
-    { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
-  ],
+  experimental_toToolResultContent: (output: { dataUrl?: string; width?: number; height?: number; error?: string }) => {
+    if (!output.dataUrl) return [{ type: 'text', text: output.error ?? 'Screenshot failed' }];
+    return [
+      { type: 'text', text: `Screenshot captured (${output.width ?? 0}x${output.height ?? 0}px).` },
+      { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
+    ];
+  },
 });
 
 // ---------- CDP Aim / Confirm / Cancel (visual feedback loop) ----------
 
 export const cdpAim = tool({
   description:
-    'Draw a red highlight square (crosshair) at viewport coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. This is the "pre-aim" step. After seeing the screenshot, decide if the position is correct. If it is, call cdpConfirm. If not, call cdpAim again with corrected coordinates. Do NOT call cdpClick directly — always use the aim→confirm flow.',
+    'Draw a red highlight square (crosshair) at viewport coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. This tool AUTOMATICALLY captures a BEFORE screenshot (no crosshair) AND an AFTER screenshot (with crosshair drawn) so you can compare them and decide if the position is correct. If the crosshair is ON target, call cdpConfirm(x, y). If NOT, call cdpCancel() then call cdpAim again with corrected coordinates. MANDATORY verification loop: aim → compare before/after → if off-target, cancel and re-aim → repeat until on target, THEN cdpConfirm. Do NOT call cdpClick directly — always use the aim→confirm flow.',
   parameters: z.object({
-    x: z.number().int().min(0).describe('Viewport X coordinate to aim at'),
-    y: z.number().int().min(0).describe('Viewport Y coordinate to aim at'),
+    x: z.number().int().min(0).describe('Viewport X coordinate to aim at (CSS pixels — see coordinate system notes)'),
+    y: z.number().int().min(0).describe('Viewport Y coordinate to aim at (CSS pixels — see coordinate system notes)'),
     size: z.number().int().min(4).max(20).default(8).describe('Side length of the highlight square in pixels (default 8)'),
   }),
   execute: async ({ x, y, size }) => {
@@ -479,14 +570,50 @@ export const cdpAim = tool({
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
+    // Pre-screenshot BEFORE drawing the crosshair so the LLM can compare
+    // before/after and verify the crosshair actually landed where it asked.
+    const before = await cdp.screenshot();
     await cdp.highlightQuad(x, y, size);
-    const dataUrl = await cdp.screenshot();
-    return { dataUrl, width: tab.width ?? 0, height: tab.height ?? 0, aimX: x, aimY: y };
+    const after = await cdp.screenshot();
+    // Compute DPR from the ACTUAL screenshot dimensions vs the tab's CSS
+    // viewport dimensions. `window.devicePixelRatio` is unreliable in
+    // Playwright/headless Chrome (often returns 1 even when the screenshot
+    // is 2x). The PNG header is the source of truth.
+    const dpr = tab.width ? after.width / tab.width : 1;
+    return {
+      dataUrl: after.dataUrl,
+      beforeDataUrl: before.dataUrl,
+      width: tab.width ?? 0,            // CSS pixels
+      height: tab.height ?? 0,          // CSS pixels
+      screenshotWidth: after.width,     // device pixels
+      screenshotHeight: after.height,   // device pixels
+      dpr,                              // device pixels per CSS pixel
+      aimX: x,
+      aimY: y,
+    };
   },
-  experimental_toToolResultContent: (output) => [
-    { type: 'text', text: `Red crosshair drawn at (${output.aimX}, ${output.aimY}). Check the screenshot — is the red square on your target? If yes, call cdpConfirm(${output.aimX}, ${output.aimY}). If no, call cdpAim with corrected coordinates.` },
-    { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
-  ],
+  experimental_toToolResultContent: (output: {
+    dataUrl: string; beforeDataUrl?: string;
+    width: number; height: number; dpr: number;
+    aimX: number; aimY: number;
+  }) => {
+    const text = [
+      `AIMED at CSS pixel (${output.aimX}, ${output.aimY}).`,
+      `Viewport is ${output.width}x${output.height} CSS pixels; devicePixelRatio=${output.dpr}, so screenshot is ${output.width * output.dpr}x${output.height * output.dpr} device pixels.`,
+      `COMPARE the BEFORE and AFTER images: is the red square on your target? If YES → cdpConfirm(${output.aimX}, ${output.aimY}). If NO → cdpCancel() + cdpAim with corrected CSS coordinates.`,
+      `IMPORTANT: You identified the target in the SCREENSHOT (device pixels). To convert back to CSS pixels for cdpAim, divide by dpr (${output.dpr}). For example a screenshot-x of ${640 * output.dpr} = CSS x 640.`,
+    ].join(' ');
+    const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
+      { type: 'text', text },
+    ];
+    if (output.beforeDataUrl) {
+      content.push({ type: 'text', text: 'BEFORE (no crosshair):' });
+      content.push({ type: 'image', data: output.beforeDataUrl, mimeType: 'image/png' });
+    }
+    content.push({ type: 'text', text: `AFTER (red crosshair at CSS ${output.aimX}, ${output.aimY}):` });
+    content.push({ type: 'image', data: output.dataUrl, mimeType: 'image/png' });
+    return content;
+  },
 });
 
 export const cdpConfirm = tool({
@@ -540,29 +667,32 @@ export const cdpCancel = tool({
 
 // ---------- Tool registry ----------
 
+// All tool errors must be OBSERVATIONS, not termination conditions. Every
+// entry here is wrapped in safeExecute so a throw becomes a normal
+// { error: string } tool result and the AI SDK loop continues.
 export const allTools = {
   // CDP native input + visual feedback.
-  cdpAim,
-  cdpConfirm,
-  cdpScroll,
-  cdpCancel,
-  cdpClick,
-  cdpType,
-  cdpPressKey,
-  cdpScreenshot,
+  cdpAim: safeExecute(cdpAim),
+  cdpConfirm: safeExecute(cdpConfirm),
+  cdpScroll: safeExecute(cdpScroll),
+  cdpCancel: safeExecute(cdpCancel),
+  cdpClick: safeExecute(cdpClick),
+  cdpType: safeExecute(cdpType),
+  cdpPressKey: safeExecute(cdpPressKey),
+  cdpScreenshot: safeExecute(cdpScreenshot),
   // Focus navigation (Tab key traversal).
-  focusNext,
-  focusPrevious,
+  focusNext: safeExecute(focusNext),
+  focusPrevious: safeExecute(focusPrevious),
   // Smart screenshot
-  smartScreenshot,
+  smartScreenshot: safeExecute(smartScreenshot),
   // Tab management
-  tabsList,
-  tabsSwitch,
-  tabsOpen,
-  tabsClose,
+  tabsList: safeExecute(tabsList),
+  tabsSwitch: safeExecute(tabsSwitch),
+  tabsOpen: safeExecute(tabsOpen),
+  tabsClose: safeExecute(tabsClose),
   // DOM tools (escape hatch — use CDP tools first).
-  domQuery,
-  domClick,
-  domType,
-  pressKey,
+  domQuery: safeExecute(domQuery),
+  domClick: safeExecute(domClick),
+  domType: safeExecute(domType),
+  pressKey: safeExecute(pressKey),
 };

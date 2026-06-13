@@ -2,68 +2,61 @@
 // runs the agent loop. State is NEVER stored in module-level variables —
 // always chrome.storage or Dexie.
 
-import { runAgent } from '@/lib/agent';
-import { db, getActiveConfig, initToolConfigs, setActiveConfig, upsertConfig } from '@/lib/db';
+import { runAgent, setWallTimeout } from '@/lib/agent';
+import { db, getActiveConfig, initToolConfigs } from '@/lib/db';
+import {
+  createSession,
+  deleteConfig,
+  deleteSession,
+  setActiveConfig,
+  setToolEnabled,
+  upsertConfig,
+} from '@/lib/data-layer';
 import type { ModelConfig } from '@/types';
 import type { StepUpdate } from '@/types/messages';
 
-export default defineBackground(() => {
-  console.log('[AgentSurfer] SW loaded OK');
+// ---------- Module-level state (allowed: listener registration + runtime maps) ----------
 
-  // Initialize tool configs with defaults on first load.
-  // Deferred to first message to avoid blocking SW startup.
-  let toolConfigsReady = false;
-  async function ensureToolConfigs() {
-    if (!toolConfigsReady) {
-      await initToolConfigs();
-      toolConfigsReady = true;
-    }
+// Map of runId -> AbortController.
+const inflight = new Map<string, AbortController>();
+// Chunk buffer for __chunks:pull (legacy pull-based delivery).
+const chunkBuf = new Map<string, unknown[]>();
+
+// Initialize tool configs with defaults on first load.
+// Deferred to first message to avoid blocking SW startup.
+let toolConfigsReady = false;
+async function ensureToolConfigs() {
+  if (!toolConfigsReady) {
+    await initToolConfigs();
+    toolConfigsReady = true;
   }
+}
 
-  // Open side panel when the user clicks the action icon.
-  // chrome.action.onClicked ONLY fires when there is no default_popup.
-  chrome.action.onClicked.addListener(async (tab) => {
-    if (tab.windowId == null) return;
-    try {
-      await chrome.sidePanel.open({ windowId: tab.windowId });
-    } catch (err) {
-      console.error('[AgentSurfer] Failed to open side panel', err);
-    }
-  });
-
-  // Map of runId -> AbortController. Persisted to chrome.storage.session so
-  // a service-worker restart doesn't lose the in-flight run.
-  const inflight = new Map<string, AbortController>();
-  const chunkBuf = new Map<string, unknown[]>();
-
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    (async () => {
-      try {
-        const result = await handleMessage(message, sender, inflight);
-        sendResponse({ ok: true, data: result });
-      } catch (err) {
-        sendResponse({
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    })();
-    return true; // keep channel open for async response
-  });
-});
+// ---------- Message routing ----------
 
 type IncomingMessage =
   | { type: 'agent:start'; payload: { runId: string; sessionId: string; prompt: string } }
   | { type: 'agent:cancel'; runId: string }
   | { type: 'screenshot:capture' }
   | { type: 'agent:list' }
+  | { type: '__chunks:pull'; runId: string }
+  | { type: 'db:create-session' }
+  | { type: 'db:set-active-config'; id: string }
+  | { type: 'db:upsert-config'; config: ModelConfig }
+  | { type: 'db:delete-config'; id: string }
+  | { type: 'db:set-tool-enabled'; name: string; enabled: boolean }
+  | { type: 'db:delete-session'; id: string }
   | { type: '__e2e:seed-config'; config: ModelConfig }
-  | { type: '__e2e:reset' };
+  | { type: '__e2e:reset' }
+  | { type: '__e2e:inspect' }
+  | { type: '__e2e:set-wall-timeout'; ms: number }
+  | { type: '__e2e:inspect-tabs' }
+  | { type: '__e2e:list-agent-steps' }
+  | { type: '__e2e:list-messages' };
 
 async function handleMessage(
   message: IncomingMessage,
-  _sender: chrome.runtime.MessageSender,
-  inflight: Map<string, AbortController>,
+  _sender: chrome.runtime.MessageSender | null,
 ): Promise<unknown> {
   await ensureToolConfigs();
   switch (message.type) {
@@ -100,6 +93,7 @@ async function handleMessage(
         prompt,
         config,
         abortSignal: ac.signal,
+        abort: () => ac.abort(),
         emit,
       }).catch((err) => {
         console.error('[SW] agent:caught', err);
@@ -121,7 +115,7 @@ async function handleMessage(
     }
 
     case '__chunks:pull': {
-      const runId = (message as { runId: string }).runId;
+      const runId = message.runId;
       const buf = chunkBuf.get(runId);
       if (!buf) return { chunks: [] };
       const chunks = buf.splice(0, buf.length);
@@ -136,6 +130,36 @@ async function handleMessage(
       // For debugging — list recent sessions.
       const recent = await db.sessions.orderBy('updatedAt').reverse().limit(10).toArray();
       return { sessions: recent };
+    }
+
+    case 'db:create-session': {
+      const session = await createSession();
+      return { session };
+    }
+
+    case 'db:set-active-config': {
+      await setActiveConfig(message.id);
+      return { ok: true };
+    }
+
+    case 'db:upsert-config': {
+      await upsertConfig(message.config);
+      return { ok: true };
+    }
+
+    case 'db:delete-config': {
+      await deleteConfig(message.id);
+      return { ok: true };
+    }
+
+    case 'db:set-tool-enabled': {
+      await setToolEnabled(message.name, message.enabled);
+      return { ok: true };
+    }
+
+    case 'db:delete-session': {
+      await deleteSession(message.id);
+      return { ok: true };
     }
 
     case '__e2e:seed-config': {
@@ -159,8 +183,107 @@ async function handleMessage(
       return { ok: true };
     }
 
+    case '__e2e:inspect': {
+      console.log('[SW] __e2e:inspect handler running');
+      const configs = await db.modelConfigs.toArray();
+      const activeConfig = configs.find((c) => c.isDefault) ?? configs[0] ?? null;
+      const sessions = await db.sessions.orderBy('updatedAt').reverse().limit(5).toArray();
+      return {
+        configs,
+        activeConfig,
+        sessions,
+        toolConfigsReady,
+      };
+    }
+
+    case '__e2e:set-wall-timeout': {
+      // E2E-only: override the wall-clock timeout for long-running tests.
+      setWallTimeout(message.ms);
+      return { ok: true, ms: message.ms };
+    }
+
+    case '__e2e:list-agent-steps': {
+      // E2E-only: return every persisted agent step (text + toolCall args +
+      // toolResults) so tests can inspect what the LLM actually said / called.
+      // agentSteps table doesn't index createdAt (per lib/db.ts schema), so
+      // we read all and sort in memory by stepNumber.
+      const allSteps = await db.agentSteps.toArray();
+      allSteps.sort((a, b) => a.stepNumber - b.stepNumber);
+      return { steps: allSteps, count: allSteps.length };
+    }
+
+    case '__e2e:list-messages': {
+      // E2E-only: return every persisted message (user + assistant) so tests
+      // can inspect the full conversation record. Sort in memory because
+      // createdAt isn't indexed on every table.
+      const allMessages = await db.messages.toArray();
+      allMessages.sort((a, b) => a.createdAt - b.createdAt);
+      return { messages: allMessages, count: allMessages.length };
+    }
+
+    case '__e2e:inspect-tabs': {
+      // E2E-only: snapshot of all tabs in this extension's browser. Used
+      // by the 22-minimax-bing-task spec to verify the agent opened/closed tabs.
+      const allTabs = await chrome.tabs.query({});
+      return {
+        count: allTabs.length,
+        urls: allTabs.map((t) => t.url ?? '').filter(Boolean),
+        ids: allTabs
+          .map((t) => t.id)
+          .filter((id): id is number => id != null),
+      };
+    }
+
     default: {
       throw new Error(`Unknown message type: ${(message as { type: string }).type}`);
     }
   }
 }
+
+// ---------- SW entrypoint ----------
+
+export default defineBackground(() => {
+  console.log('[AgentSurfer] SW loaded OK');
+
+  // Open side panel when the user clicks the action icon.
+  // chrome.action.onClicked ONLY fires when there is no default_popup.
+  chrome.action.onClicked.addListener(async (tab) => {
+    if (tab.windowId == null) return;
+    try {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+    } catch (err) {
+      console.error('[AgentSurfer] Failed to open side panel', err);
+    }
+  });
+
+  // All messages go through handleMessage. Must return true for async response.
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    const msgType = (message as { type: string }).type;
+    console.log(`[SW] onMessage received: ${msgType}`);
+    (async () => {
+      try {
+        const result = await handleMessage(message, sender);
+        const plain = JSON.parse(JSON.stringify(result));
+        sendResponse({ ok: true, data: plain });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        sendResponse({ ok: false, error: errMsg });
+      }
+    })();
+    return true;
+  });
+
+  // Also listen on connect ports for long-lived e2e communication.
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'e2e-diag') return;
+    port.onMessage.addListener(async (msg) => {
+      try {
+        const result = await handleMessage(msg, null);
+        const plain = JSON.parse(JSON.stringify(result));
+        port.postMessage({ ok: true, data: plain });
+      } catch (err) {
+        port.postMessage({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+  });
+});

@@ -5,14 +5,20 @@ import { Loader2, RefreshCw, Settings as SettingsIcon, Square, Wand2 } from 'luc
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
-import { useAgentStore, useSessionStore, useSettingsStore } from '@/stores';
+import { useAgentStore, useSessionStore, useSettingsStore, useModelConfigsSync, type TokenUsage, type ProgressUpdate, type ToolResultEvent, type TodoItem } from '@/stores';
 import { db } from '@/lib/db';
+import { useChangeCount } from '@/lib/use-change-count';
+import { sendToSW } from '@/lib/sw-messenger';
+import type { StepUpdate } from '@/types/messages';
 import { ChatThread } from './components/ChatThread';
 import { InputBar } from './components/InputBar';
 import { ModelBadge } from './components/ModelBadge';
 import { Sidebar } from './components/Sidebar';
 
 export default function App() {
+  // Re-sync Zustand active config when SW writes to modelConfigs.
+  useModelConfigsSync();
+
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
   const startNewSession = useSessionStore((s) => s.startNewSession);
   const setCurrent = useSessionStore((s) => s.setCurrentSession);
@@ -23,6 +29,10 @@ export default function App() {
   const appendText = useAgentStore((s) => s.appendText);
   const appendReasoning = useAgentStore((s) => s.appendReasoning);
   const addStreamingToolCall = useAgentStore((s) => s.addStreamingToolCall);
+  const recordToolResult = useAgentStore((s) => s.recordToolResult);
+  const recordTokenUsage = useAgentStore((s) => s.recordTokenUsage);
+  const setProgress = useAgentStore((s) => s.setProgress);
+  const setTodos = useAgentStore((s) => s.setTodos);
   const accumulatedText = useAgentStore((s) => s.accumulatedText);
   const accumulatedReasoning = useAgentStore((s) => s.accumulatedReasoning);
   const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
@@ -33,10 +43,12 @@ export default function App() {
   const isRunning = useAgentStore((s) => s.isRunning);
   const currentRunId = useAgentStore((s) => s.runId);
 
+  const sessionChangeCount = useChangeCount('sessions');
   const mostRecentSession = useLiveQuery(
     async () => (await db.sessions.orderBy('updatedAt').reverse().first()) ?? null,
-    [],
-    null,
+    [sessionChangeCount],
+    // undefined initial value: distinguishes "loading" from "no sessions".
+    undefined as { id: string; title: string; createdAt: number; updatedAt: number } | null | undefined,
   );
 
   // On first open, ensure we have a session selected.
@@ -44,15 +56,35 @@ export default function App() {
     if (!settingsReady) hydrate();
   }, [settingsReady, hydrate]);
 
+  // Track the previous session id so we only reset agent state when the
+  // session actually changes — not on every Dexie write that touches the
+  // session row (e.g. updatedAt bump from appendMessage). Without this,
+  // the effect re-runs and resetAgent() wipes isRunning mid-run, hiding
+  // the streaming text and the Cancel button.
+  const prevSessionIdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (currentSessionId) {
+    if (currentSessionId && currentSessionId !== prevSessionIdRef.current) {
+      prevSessionIdRef.current = currentSessionId;
       // Session changed → reset agent state (clear errors, live text, etc.)
       resetAgent();
       return;
     }
+    if (currentSessionId) {
+      // Same session — don't reset. updatedAt bumps from appendMessage
+      // re-render useLiveQuery and would otherwise kill an in-flight run.
+      prevSessionIdRef.current = currentSessionId;
+      return;
+    }
+    // `mostRecentSession === null` is ambiguous: it could mean "Dexie has no
+    // sessions" OR "Dexie query is still loading" (initial render). Only
+    // create a new session if the query has completed (undefined) and
+    // returned null. The 3rd arg of useLiveQuery is the initial value —
+    // we set it to undefined so the first render is distinguishable.
+    if (mostRecentSession === undefined) return; // still loading
     if (mostRecentSession) setCurrent(mostRecentSession.id);
     else startNewSession();
-  }, [currentSessionId, mostRecentSession, setCurrent, startNewSession]);
+  }, [currentSessionId, mostRecentSession, setCurrent, startNewSession, resetAgent]);
 
   // Listen for messages from the service worker.
   const setStepRef = useRef(setStep);
@@ -67,6 +99,14 @@ export default function App() {
   appendReasoningRef.current = appendReasoning;
   const addTcRef = useRef(addStreamingToolCall);
   addTcRef.current = addStreamingToolCall;
+  const recordToolResultRef = useRef(recordToolResult);
+  recordToolResultRef.current = recordToolResult;
+  const recordTokenUsageRef = useRef(recordTokenUsage);
+  recordTokenUsageRef.current = recordTokenUsage;
+  const setProgressRef = useRef(setProgress);
+  setProgressRef.current = setProgress;
+  const setTodosRef = useRef(setTodos);
+  setTodosRef.current = setTodos;
 
   // Event listener — pure event consumption. UI owns all state.
   useEffect(() => {
@@ -81,6 +121,14 @@ export default function App() {
         finishRef.current();
       } else if (t === 'agent_error') {
         failRef.current(String((message as { message?: string }).message ?? 'Agent error'));
+      } else if (t === 'tool_result') {
+        recordToolResultRef.current(message as unknown as ToolResultEvent);
+      } else if (t === 'token_usage') {
+        recordTokenUsageRef.current(message as unknown as TokenUsage);
+      } else if (t === 'progress') {
+        setProgressRef.current(message as unknown as ProgressUpdate);
+      } else if (t === 'todo_update') {
+        setTodosRef.current(((message as { todos: TodoItem[] }).todos) ?? []);
       } else if (t === 'chunk') {
         const c = (message as { data?: { type: string; [k: string]: unknown } }).data;
         if (!c) return;
@@ -121,7 +169,7 @@ export default function App() {
     const runId = crypto.randomUUID();
     setRunId(runId);
     try {
-      await chrome.runtime.sendMessage({
+      await sendToSW({
         type: 'agent:start',
         payload: { runId, sessionId: currentSessionId, prompt },
       });
@@ -135,7 +183,7 @@ export default function App() {
     cancelRun();
     if (runId) {
       try {
-        await chrome.runtime.sendMessage({ type: 'agent:cancel', runId });
+        await sendToSW({ type: 'agent:cancel', runId });
       } catch {
         // ignore
       }

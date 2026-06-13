@@ -3,12 +3,38 @@
 // the side panel / options page and seeding Dexie with a test config.
 
 import { type BrowserContext, chromium, type Page } from '@playwright/test';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { resolve as pathResolve } from 'node:path';
 import path from 'node:path';
 
 const SW_LOG = path.resolve('.e2e-logs/sw.log');
+const USER_DATA_ROOT = path.resolve('.e2e-logs/chrome-userdata');
+const SHOTS_ROOT = path.resolve('.e2e-logs');
 
 const EXTENSION_PATH = path.resolve('.output/chrome-mv3');
+
+// All non-todo tool names. `todo` is always added by the agent runtime
+// (lib/agent.ts) and cannot be disabled.
+const ALL_NON_TODO_TOOLS = [
+  'cdpAim', 'cdpConfirm', 'cdpScroll', 'cdpCancel',
+  'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
+  'focusNext', 'focusPrevious',
+  'smartScreenshot', 'screenshot',
+  'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
+  'domQuery', 'domClick', 'domType', 'pressKey',
+] as const;
+
+// Per-launch Chrome user data dir. We use a unique fresh dir to prevent
+// Chrome from serving a cached older version of the extension's SW JS
+// (manifest version bumps alone don't always force Chrome to reload).
+let launchCounter = 0;
+
+export interface SnapshotResult {
+  tMs: number;
+  textLength: number;
+  screenshot: string;
+  isDone: boolean;
+}
 
 export interface ExtensionHandle {
   ctx: BrowserContext;
@@ -20,10 +46,34 @@ export interface ExtensionHandle {
   seedMockConfig: (page: Page) => Promise<void>;
   seedLiveConfig: (page: Page, provider: 'MiniMax' | 'mimo', apiKey: string) => Promise<void>;
   cleanup: () => Promise<void>;
+  // ---- Live-LLM E2E helpers (used by specs 20/21/22) ----
+  clearSWLog: () => void;
+  dbMsg: (page: Page, msg: { type: string; [k: string]: unknown }) => Promise<unknown>;
+  resetDb: (page: Page) => Promise<void>;
+  enableOnlyTools: (page: Page, names: readonly string[]) => Promise<void>;
+  setReactTextareaValue: (page: Page, selector: string, value: string) => Promise<void>;
+  captureSnapshots: (page: Page, opts: {
+    intervalMs: number; durationMs: number; label: string;
+  }) => Promise<SnapshotResult[]>;
+  readApiKey: (varName?: string) => string;
+  inspectTabs: (page: Page) => Promise<{ count: number; urls: string[]; ids: number[] }>;
+  setWallTimeout: (page: Page, ms: number) => Promise<void>;
+  getAssistantTextLength: (page: Page) => Promise<number>;
+  isAgentRunning: (page: Page) => Promise<boolean>;
+  readSWLog: () => string;
+  listAgentSteps: (page: Page) => Promise<{ steps: unknown[]; count: number }>;
+  listMessages: (page: Page) => Promise<{ messages: unknown[]; count: number }>;
 }
 
 export async function launchWithExtension(): Promise<ExtensionHandle> {
-  const ctx = await chromium.launchPersistentContext('', {
+  // Fresh per-launch user data dir. We use a timestamped subdir of
+  // USER_DATA_ROOT so Chrome doesn't reuse a previously-installed
+  // version of the extension (which can be cached even with manifest
+  // version bumps, and would cause tests to silently run against stale JS).
+  const userDataDir = path.join(USER_DATA_ROOT, `run-${Date.now()}-${++launchCounter}`);
+  mkdirSync(userDataDir, { recursive: true });
+
+  const ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     args: [
       `--disable-extensions-except=${EXTENSION_PATH}`,
@@ -108,13 +158,8 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
    */
   async function seedLiveConfig(page: Page, provider: 'MiniMax' | 'mimo', apiKey: string) {
     const configId = `e2e-${provider}-${Date.now()}`;
-    // Send the message WITHOUT resetting first — `db.delete()` + reopen
-    // can race with the open() of a freshly-reloaded side panel.
-    // Also: render a visible marker on the page so the screenshot shows
-    // the seed result even if the side panel state is otherwise wrong.
     const seedRes = await page.evaluate(
       async ({ configId, provider, apiKey }) => {
-        // @ts-expect-error injected in the page context
         const cfg = {
           id: configId,
           name: `${provider} (live E2E)`,
@@ -125,41 +170,185 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
           isDefault: true,
           createdAt: Date.now(),
         };
-        let r1: unknown, r1Err: unknown;
-        try {
-          r1 = await chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg });
-        } catch (e) {
-          r1Err = String(e);
-        }
-        let r2: unknown, r2Err: unknown;
-        try {
-          r2 = await chrome.runtime.sendMessage({ type: '__e2e:inspect' });
-        } catch (e) {
-          r2Err = String(e);
-        }
-        // Render a visible marker that survives across reloads (it's in
-        // the page DOM, not Dexie).
-        const old = document.getElementById('__e2e-marker');
-        if (old) old.remove();
-        const m = document.createElement('div');
-        m.id = '__e2e-marker';
-        m.dataset.seed = JSON.stringify(r1);
-        m.dataset.seedErr = r1Err ? String(r1Err) : '';
-        m.dataset.inspect = JSON.stringify(r2);
-        m.dataset.inspectErr = r2Err ? String(r2Err) : '';
-        m.style.cssText = 'position:fixed;bottom:0;left:0;background:lime;color:black;padding:4px;z-index:99999;font:11px monospace;max-width:100%;word-break:break-all;';
-        m.textContent = `seed=${JSON.stringify(r1).slice(0, 200)} inspect=${JSON.stringify(r2).slice(0, 200)}`;
-        document.body.appendChild(m);
-        return { r1, r1Err, r2, r2Err };
+        const seed = await new Promise((resolve, reject) => {
+          chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg }, (response) => {
+            if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+            else resolve(response);
+          });
+        });
+        return seed;
       },
       { configId, provider, apiKey },
     );
-    console.log('[seed result]', JSON.stringify(seedRes));
+    return seedRes;
+  }
+
+  /** Send a db:* message via port (reliable async response). */
+  async function dbMsgPort(page: Page, message: { type: string; [k: string]: unknown }): Promise<unknown> {
+    return page.evaluate(async (msg) => {
+      const port = chrome.runtime.connect({ name: 'e2e-diag' });
+      const result = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('port timeout: ' + msg.type)), 10000);
+        port.onMessage.addListener(function handler(response) {
+          clearTimeout(timeout);
+          port.disconnect();
+          resolve(response);
+        });
+        port.postMessage(msg);
+      });
+      return result;
+    }, message);
   }
 
   async function cleanup() {
     await ctx.close().catch(() => {});
+    // Best-effort cleanup of the per-launch user data dir to avoid
+    // accumulating hundreds of MB of cached Chrome state.
+    try { rmSync(userDataDir, { recursive: true, force: true }); } catch {}
   }
 
-  return { ctx, extId, sw, openSidePanel, openOptions, seedMockConfig, seedLiveConfig, cleanup };
+  // ============================================================
+  // Live-LLM E2E helpers (specs 20 / 21 / 22)
+  // ============================================================
+
+  /** Truncate the SW console log. Call BEFORE launch so old runs don't pollute. */
+  function clearSWLog() {
+    try { writeFileSync(SW_LOG, ''); } catch { /* ignore */ }
+  }
+
+  /** Read the entire SW log (used for diagnostics after a run). */
+  function readSWLog(): string {
+    try { return readFileSync(SW_LOG, 'utf-8'); } catch { return ''; }
+  }
+
+  /** Send a db:* SW message and return the unwrapped data (ok branch). */
+  async function dbMsg(page: Page, message: { type: string; [k: string]: unknown }): Promise<unknown> {
+    const res = (await dbMsgPort(page, message)) as { ok: boolean; data?: unknown; error?: string };
+    if (!res?.ok) throw new Error(res?.error ?? `dbMsg ${message.type} failed`);
+    return res.data;
+  }
+
+  /** Wipe Dexie. Wait 200ms after to avoid the open/close race noted in CLAUDE.md §7. */
+  async function resetDb(page: Page): Promise<void> {
+    await dbMsgPort(page, { type: '__e2e:reset' });
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  /** Disable every non-todo tool, then enable exactly `names`. */
+  async function enableOnlyTools(page: Page, names: readonly string[]): Promise<void> {
+    const want = new Set(names);
+    for (const n of ALL_NON_TODO_TOOLS) {
+      const enabled = want.has(n);
+      await dbMsgPort(page, { type: 'db:set-tool-enabled', name: n, enabled });
+    }
+  }
+
+  /**
+   * Set the value of a React-controlled textarea via the native value setter
+   * (Playwright's `fill()` does not trigger React's onChange on controlled inputs).
+   * Pattern copied from e2e/specs/04-real-google-search.spec.ts.
+   */
+  async function setReactTextareaValue(page: Page, selector: string, value: string): Promise<void> {
+    await page.locator(selector).waitFor({ state: 'visible' });
+    await page.locator(selector).evaluate((el, v) => {
+      const ta = el as HTMLTextAreaElement;
+      const proto = Object.getPrototypeOf(ta) as object;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) (setter as (v: string) => void).call(ta, v);
+      else ta.value = v;
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value);
+  }
+
+  /** Length of the LAST [data-testid="message-bubble"] text content. */
+  async function getAssistantTextLength(page: Page): Promise<number> {
+    const bubbles = page.locator('[data-testid="message-bubble"]');
+    const count = await bubbles.count();
+    if (count === 0) return 0;
+    const last = bubbles.nth(count - 1);
+    const txt = await last.textContent();
+    return txt?.length ?? 0;
+  }
+
+  /** True if the agent is running (Cancel button is visible in InputBar). */
+  async function isAgentRunning(page: Page): Promise<boolean> {
+    return page.locator('button[title="Cancel run"]').isVisible().catch(() => false);
+  }
+
+  /**
+   * Take periodic screenshots of the side panel and record assistant text length.
+   * Each screenshot is saved to `.e2e-logs/<label>-t<seconds>s.png`.
+   * The loop also stops early if the agent is no longer running AND a t=0 snapshot
+   * was taken at least once, so a fast "hi" reply doesn't waste the full window.
+   */
+  async function captureSnapshots(
+    page: Page,
+    opts: { intervalMs: number; durationMs: number; label: string },
+  ): Promise<SnapshotResult[]> {
+    const out: SnapshotResult[] = [];
+    const t0 = Date.now();
+    let tick = 0;
+    // Take the first snapshot immediately (t=0).
+    for (;;) {
+      const tMs = Date.now() - t0;
+      const sec = Math.round(tMs / 1000);
+      const fname = `${opts.label}-t${sec}s.png`;
+      const fpath = path.join(SHOTS_ROOT, fname);
+      try { await page.screenshot({ path: fpath, fullPage: true }); } catch { /* ignore */ }
+      const textLength = await getAssistantTextLength(page).catch(() => 0);
+      const running = await isAgentRunning(page).catch(() => false);
+      const isDone = !running && tMs > 500; // give SP 500ms to mount Cancel button
+      out.push({ tMs, textLength, screenshot: fpath, isDone });
+      console.log(`[${opts.label}] t=${sec}s textLength=${textLength} running=${running} done=${isDone} -> ${fpath}`);
+      if (tMs >= opts.durationMs) break;
+      if (isDone && tick >= 1) {
+        // Agent finished before window closed. Take one final shot + exit.
+        const finalSec = Math.round((Date.now() - t0) / 1000);
+        const ffinal = path.join(SHOTS_ROOT, `${opts.label}-t${finalSec}s-final.png`);
+        try { await page.screenshot({ path: ffinal, fullPage: true }); } catch { /* ignore */ }
+        out.push({ tMs: Date.now() - t0, textLength, screenshot: ffinal, isDone: true });
+        console.log(`[${opts.label}] agent finished early at t=${finalSec}s`);
+        break;
+      }
+      tick += 1;
+      await new Promise((r) => setTimeout(r, opts.intervalMs));
+    }
+    return out;
+  }
+
+  /** Read a single var from `.env`. Throws if missing. */
+  function readApiKey(varName: string = 'MINIMAX_API_KEY'): string {
+    const txt = readFileSync(pathResolve('.env'), 'utf-8');
+    const m = txt.match(new RegExp(`^${varName}=(.+)$`, 'm'));
+    const v = m?.[1]?.trim();
+    if (!v) throw new Error(`${varName} missing from .env`);
+    return v;
+  }
+
+  /** Snapshot of every tab visible to the extension. */
+  async function inspectTabs(page: Page): Promise<{ count: number; urls: string[]; ids: number[] }> {
+    return (await dbMsg(page, { type: '__e2e:inspect-tabs' })) as { count: number; urls: string[]; ids: number[] };
+  }
+
+  /** Override the agent's wall-clock timeout (ms). */
+  async function setWallTimeout(page: Page, ms: number): Promise<void> {
+    await dbMsgPort(page, { type: '__e2e:set-wall-timeout', ms });
+  }
+
+  /** Read every persisted agent step (text, toolCalls, toolResults). */
+  async function listAgentSteps(page: Page): Promise<{ steps: unknown[]; count: number }> {
+    return (await dbMsg(page, { type: '__e2e:list-agent-steps' })) as { steps: unknown[]; count: number };
+  }
+
+  /** Read every persisted message (user + assistant). */
+  async function listMessages(page: Page): Promise<{ messages: unknown[]; count: number }> {
+    return (await dbMsg(page, { type: '__e2e:list-messages' })) as { messages: unknown[]; count: number };
+  }
+
+  return {
+    ctx, extId, sw, openSidePanel, openOptions, seedMockConfig, seedLiveConfig, cleanup,
+    clearSWLog, dbMsg, resetDb, enableOnlyTools, setReactTextareaValue, captureSnapshots,
+    readApiKey, inspectTabs, setWallTimeout, getAssistantTextLength, isAgentRunning, readSWLog,
+    listAgentSteps, listMessages,
+  };
 }

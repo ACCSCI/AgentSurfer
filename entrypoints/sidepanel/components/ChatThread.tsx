@@ -2,14 +2,19 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef } from 'react';
 
 import { db, getMessagesBySession, getStepsForMessage } from '@/lib/db';
+import { useChangeCount } from '@/lib/use-change-count';
 import { useAgentStore } from '@/stores';
 import { MessageBubble } from './MessageBubble';
 
 export function ChatThread({ sessionId }: { sessionId: string }) {
+  // Re-query when SW writes to messages or agentSteps tables.
+  const messageChangeCount = useChangeCount('messages');
+  const stepChangeCount = useChangeCount('agentSteps');
+
   // Query 1: messages for this session — re-runs when any message row changes.
   const messages = useLiveQuery(
     () => getMessagesBySession(sessionId),
-    [sessionId],
+    [sessionId, messageChangeCount],
     [],
   );
 
@@ -24,10 +29,7 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
       }
       return map;
     },
-    // Key on sessionId — this makes the query re-run whenever
-    // the session changes. The nested getStepsForMessage also queries
-    // the agentSteps table, which liveQuery watches.
-    [sessionId],
+    [sessionId, messageChangeCount, stepChangeCount],
     new Map(),
   );
 
@@ -69,7 +71,28 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
           }
         />
       ))}
-      {isRunning && (messages ?? []).length > 0 && (messages ?? [])[(messages ?? []).length - 1]?.role === 'user' && (
+      {/* Streaming bubble: shown when the agent is running but the persisted
+          assistant message has not been written yet (it only appears after
+          onFinish → appendMessage). This is the ONLY place the user sees
+          the streaming text grow in real time on the first response. */}
+      {isRunning && (messages ?? []).length > 0 && (messages ?? [])[(messages ?? []).length - 1]?.role === 'user' && (accumulatedText || accumulatedReasoning || liveToolCalls.length > 0) && (
+        <MessageBubble
+          message={{
+            id: '__live_streaming__',
+            sessionId: 'live',
+            role: 'assistant',
+            parts: [],
+            createdAt: 0,
+            screenshotIds: [],
+          } as unknown as import('@/types').ChatMessage}
+          steps={[]}
+          isLive={true}
+          liveText={accumulatedText}
+          liveReasoning={accumulatedReasoning}
+          liveToolCalls={liveToolCalls}
+        />
+      )}
+      {isRunning && (messages ?? []).length > 0 && (messages ?? [])[(messages ?? []).length - 1]?.role === 'user' && !(accumulatedText || accumulatedReasoning || liveToolCalls.length > 0) && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
           Agent is running…

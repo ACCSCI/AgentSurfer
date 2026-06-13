@@ -7,11 +7,18 @@ import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from '
 import { resolve as pathResolve } from 'node:path';
 import path from 'node:path';
 
+import { traceStart, traceEnd, traceFail } from './trace';
+
 const SW_LOG = path.resolve('.e2e-logs/sw.log');
 const USER_DATA_ROOT = path.resolve('.e2e-logs/chrome-userdata');
 const SHOTS_ROOT = path.resolve('.e2e-logs');
 
-const EXTENSION_PATH = path.resolve('.output/chrome-mv3');
+// Always use ABSOLUTE path for the extension dir. Relative paths get
+// normalized by Chrome on Windows which can strip the leading "." —
+// then Chrome reports "清单文件缺失" (manifest missing) because it
+// looks at `output\chrome-mv3` (no dot) instead of `.output\chrome-mv3`.
+const PROJECT_ROOT = path.resolve('.');
+const EXTENSION_PATH = path.join(PROJECT_ROOT, '.output', 'chrome-mv3');
 
 // All non-todo tool names. `todo` is always added by the agent runtime
 // (lib/agent.ts) and cannot be disabled.
@@ -66,6 +73,7 @@ export interface ExtensionHandle {
 }
 
 export async function launchWithExtension(): Promise<ExtensionHandle> {
+  traceStart('1 browser launch');
   // Fresh per-launch user data dir. We use a timestamped subdir of
   // USER_DATA_ROOT so Chrome doesn't reuse a previously-installed
   // version of the extension (which can be cached even with manifest
@@ -73,6 +81,7 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   const userDataDir = path.join(USER_DATA_ROOT, `run-${Date.now()}-${++launchCounter}`);
   mkdirSync(userDataDir, { recursive: true });
 
+  traceStart('2 context create');
   const ctx = await chromium.launchPersistentContext(userDataDir, {
     headless: false,
     args: [
@@ -83,10 +92,32 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
     viewport: { width: 1280, height: 800 },
     locale: 'en-US',
   });
+  traceEnd('2 context create', { userDataDir });
 
   // Wait for the service worker to register. The SW URL is
   // `chrome-extension://<extId>/background.js`.
-  const sw = await ctx.waitForEvent('serviceworker', { timeout: 20_000 });
+  // Use ctx.serviceWorkers() FIRST (race-safe) — if the SW is already
+  // registered (Playwright may miss the event when it fires during
+  // launch), pick it up immediately. Otherwise waitForEvent with a
+  // generous timeout.
+  traceStart('3 sw register');
+  let sw = ctx.serviceWorkers().find((w) => w.url().includes('background.js'));
+  if (sw) {
+    traceEnd('3 sw register (already)', { swUrl: sw.url(), via: 'poll' });
+  } else {
+    sw = await ctx.waitForEvent('serviceworker', { timeout: 20_000 }).catch(() => {
+      // Last resort: poll again right before giving up.
+      const polled = ctx.serviceWorkers().find((w) => w.url().includes('background.js'));
+      if (polled) return polled;
+      return null;
+    });
+    if (sw) {
+      traceEnd('3 sw register (late)', { swUrl: sw.url(), via: 'event-or-poll' });
+    } else {
+      traceFail('3 sw register', new Error('SW never registered in 20s'));
+      throw new Error('Service worker did not register within 20s. Check .output/chrome-mv3/manifest.json exists and has no syntax errors.');
+    }
+  }
 
   // Forward SW console + network to the test runner so we can see what's
   // happening. SW pages are also Pages from Playwright's perspective.
@@ -127,6 +158,7 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   const sidePanelUrl = `chrome-extension://${extId}/sidepanel.html`;
   let sidePanel: Awaited<ReturnType<typeof openSidePanelOnce>>['page'] | null = null;
   async function openSidePanelOnce() {
+    traceStart('4 page create (side panel)');
     const page = await ctx.newPage();
     page.on('console', (msg) => {
       const t = msg.text();
@@ -135,12 +167,15 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
     page.on('pageerror', (err) => {
       console.log(`[SP:pageerror]`, err.message);
     });
+    traceStart('5 goto side panel');
     await page.goto(sidePanelUrl);
+    traceEnd('5 goto side panel', { url: page.url() });
     return { page, url: page.url() };
   }
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const r = await openSidePanelOnce();
+      traceEnd('4 page create (side panel)');
       // Verify the navigation actually landed on the extension URL.
       // If page.url() is still about:blank, the goto failed silently.
       if (r.url.startsWith('chrome-extension://')) {
@@ -150,6 +185,7 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
       console.log(`[fixture] side panel goto returned URL ${r.url}, retrying (attempt ${attempt}/3)`);
       await r.page.close().catch(() => {});
     } catch (err) {
+      traceFail('4 page create (side panel)', err, { attempt });
       console.log(`[fixture] side panel goto threw: ${err instanceof Error ? err.message : err} (attempt ${attempt}/3)`);
     }
     if (attempt < 3) await new Promise((r) => setTimeout(r, 500));
@@ -157,9 +193,12 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   if (!sidePanel) throw new Error('Side panel failed to load after 3 attempts. Check SW registration.');
 
   // Wait for the React app to mount (look for the AgentSurfer heading).
+  traceStart('6 extension ready (AgentSurfer heading)');
   try {
     await sidePanel.waitForSelector('text=AgentSurfer', { timeout: 10_000 });
-  } catch {
+    traceEnd('6 extension ready (AgentSurfer heading)');
+  } catch (err) {
+    traceFail('6 extension ready (AgentSurfer heading)', err);
     // Best-effort. Test code can wait again if needed.
   }
 

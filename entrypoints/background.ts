@@ -54,7 +54,8 @@ type IncomingMessage =
   | { type: '__e2e:list-agent-steps' }
   | { type: '__e2e:list-messages' }
   | { type: '__e2e:highlight-rect'; tabId: number; x: number; y: number; width: number; height: number; color: string; keepMs?: number }
-  | { type: '__e2e:cdp-debug'; tabId: number; x: number; y: number; color: string; size: number };
+  | { type: '__e2e:cdp-debug'; tabId: number; x: number; y: number; color: string; size: number }
+  | { type: '__e2e:coord-mapping'; tabId: number };
 
 async function handleMessage(
   message: IncomingMessage,
@@ -234,6 +235,99 @@ async function handleMessage(
           .map((t) => t.id)
           .filter((id): id is number => id != null),
       };
+    }
+
+    case '__e2e:coord-mapping': {
+      // Phase-2 diagnostic: read every Chrome coordinate system value, then
+      // draw 3 known-position overlays and capture each so we can derive
+      // the linear mapping `overlayX = a*requestedX + b`.
+      // msg: { tabId }
+      const { tabId } = message as { tabId: number };
+      const out: Record<string, unknown> = {};
+      // 1. attach + DOM.enable + Overlay.enable
+      try { await chrome.debugger.attach({ tabId }, '1.3'); } catch (err) {
+        return { attachError: err instanceof Error ? err.message : String(err) };
+      }
+      try { await chrome.debugger.sendCommand({ tabId }, 'DOM.enable'); } catch {}
+      try { await chrome.debugger.sendCommand({ tabId }, 'Overlay.enable'); } catch {}
+      // 2. Page.getLayoutMetrics (CDP) → layout viewport + visual viewport
+      try {
+        const lm = await chrome.debugger.sendCommand<{
+          layoutViewport: { pageX: number; pageY: number; clientWidth: number; clientHeight: number };
+          visualViewport: { offsetX: number; offsetY: number; pageX: number; pageY: number; clientWidth: number; clientHeight: number; scale: number; zoom: number };
+          cssLayoutViewport: { clientWidth: number; clientHeight: number };
+          cssVisualViewport: { clientWidth: number; clientHeight: number; pageX: number; pageY: number; scale: number };
+        }>({ tabId }, 'Page.getLayoutMetrics');
+        out.PageGetLayoutMetrics = lm;
+      } catch (err) {
+        out.PageGetLayoutMetrics = { error: err instanceof Error ? err.message : String(err) };
+      }
+      // 3. chrome.scripting.executeScript → read window.* values
+      try {
+        const result = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const w = window as unknown as Record<string, unknown>;
+            return {
+              devicePixelRatio: window.devicePixelRatio,
+              innerWidth: window.innerWidth,
+              innerHeight: window.innerHeight,
+              outerWidth: window.outerWidth,
+              outerHeight: window.outerHeight,
+              screenX: window.screenX,
+              screenY: window.screenY,
+              scrollX: window.scrollX,
+              scrollY: window.scrollY,
+              devicePixelRatio_again: w['devicePixelRatio'],
+              visualViewport: window.visualViewport ? {
+                width: window.visualViewport.width,
+                height: window.visualViewport.height,
+                offsetX: window.visualViewport.offsetX,
+                offsetY: window.visualViewport.offsetY,
+                pageX: window.visualViewport.pageX,
+                pageY: window.visualViewport.pageY,
+                scale: window.visualViewport.scale,
+              } : null,
+              visualViewportApi: typeof w['visualViewport'] !== 'undefined',
+            };
+          },
+        });
+        out.windowMetrics = (result[0]?.result) ?? { error: 'no result' };
+      } catch (err) {
+        out.windowMetrics = { error: err instanceof Error ? err.message : String(err) };
+      }
+      // 4. Draw 3 overlays at known positions, capture after each
+      // Chrome limits chrome.tabs.captureVisibleTab to ~3 calls/sec
+      // (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND). Spread them out.
+      const positions = [
+        { name: 'top-left',     x: 0,   y: 0,   w: 100, h: 100 },
+        { name: 'offset-100',   x: 100, y: 100, w: 100, h: 100 },
+        { name: 'mid-screen',   x: 500, y: 500, w: 100, h: 100 },
+      ];
+      const shots: Array<{ name: string; requestedQuad: number[]; dataUrl?: string; sizeKB?: number; error?: string }> = [];
+      for (const [i, pos] of positions.entries()) {
+        const quad = [pos.x, pos.y, pos.x + pos.w, pos.y, pos.x + pos.w, pos.y + pos.h, pos.x, pos.y + pos.h];
+        try {
+          await chrome.debugger.sendCommand({ tabId }, 'Overlay.highlightQuad', {
+            quad,
+            color: { r: 255, g: 0, b: 0, a: 0.5 },
+            outlineColor: { r: 255, g: 255, b: 255, a: 1 },
+          });
+        } catch {}
+        await new Promise((r) => setTimeout(r, 100));
+        // Wait an extra 350ms between captures to stay under the
+        // MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.
+        if (i > 0) await new Promise((r) => setTimeout(r, 350));
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.windowId != null) {
+          if (!tab.active) await chrome.tabs.update(tabId, { active: true });
+          await new Promise((r) => setTimeout(r, 50));
+          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+          shots.push({ name: pos.name, requestedQuad: quad, dataUrl, sizeKB: Math.round(dataUrl.length / 1024) });
+        }
+      }
+      out.overlayShots = shots;
+      return out;
     }
 
     case '__e2e:highlight-rect': {

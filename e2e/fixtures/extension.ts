@@ -3,7 +3,7 @@
 // the side panel / options page and seeding Dexie with a test config.
 
 import { type BrowserContext, chromium, type Page } from '@playwright/test';
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve as pathResolve } from 'node:path';
 import path from 'node:path';
 
@@ -73,6 +73,26 @@ export interface ExtensionHandle {
 }
 
 export async function launchWithExtension(): Promise<ExtensionHandle> {
+  // Pre-flight: verify the extension manifest is present BEFORE Chrome
+  // launches. If the build hasn't finished or the path is wrong, fail
+  // fast with a clear message — don't let Chrome report "manifest
+  // missing" in a Windows file dialog (which hides the leading dot and
+  // makes the error look like a path bug instead of a build issue).
+  const manifestPath = path.join(EXTENSION_PATH, 'manifest.json');
+  if (!existsSync(manifestPath)) {
+    throw new Error(
+      `Extension manifest missing at ${manifestPath}\n` +
+      `EXTENSION_PATH=${EXTENSION_PATH}\n` +
+      `CWD=${process.cwd()}\n` +
+      `Run \`bun run build\` and retry.`
+    );
+  }
+  try {
+    JSON.parse(readFileSync(manifestPath, 'utf-8'));
+  } catch (err) {
+    throw new Error(`Extension manifest is not valid JSON: ${manifestPath}\n${err}`);
+  }
+
   traceStart('1 browser launch');
   // Fresh per-launch user data dir. We use a timestamped subdir of
   // USER_DATA_ROOT so Chrome doesn't reuse a previously-installed
@@ -96,29 +116,33 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
 
   // Wait for the service worker to register. The SW URL is
   // `chrome-extension://<extId>/background.js`.
-  // Use ctx.serviceWorkers() FIRST (race-safe) — if the SW is already
-  // registered (Playwright may miss the event when it fires during
-  // launch), pick it up immediately. Otherwise waitForEvent with a
-  // generous timeout.
+  //
+  // Strategy (race-safe, predicate-filtered):
+  //   1. Poll already-registered SWs first. Catches SWs registered
+  //      before Playwright's listener was attached.
+  //   2. If not found, waitForEvent with a `predicate` that EXACTLY
+  //      matches `/background.js$` at the end of the URL. This
+  //      rejects any other extension's SW or Chrome's internal SW.
   traceStart('3 sw register');
-  let sw = ctx.serviceWorkers().find((w) => w.url().includes('background.js'));
-  if (sw) {
-    traceEnd('3 sw register (already)', { swUrl: sw.url(), via: 'poll' });
+  const isOurSw = (w: { url: () => string }) => /\/background\.js$/.test(w.url());
+  const existing = ctx.serviceWorkers().find(isOurSw);
+  let sw: { url: () => string } | null = null;
+  if (existing) {
+    sw = existing;
+    traceEnd('3 sw register (poll)', { swUrl: existing.url(), via: 'poll' });
   } else {
-    sw = await ctx.waitForEvent('serviceworker', { timeout: 20_000 }).catch(() => {
-      // Last resort: poll again right before giving up.
-      const polled = ctx.serviceWorkers().find((w) => w.url().includes('background.js'));
-      if (polled) return polled;
-      return null;
-    });
-    if (sw) {
-      traceEnd('3 sw register (late)', { swUrl: sw.url(), via: 'event-or-poll' });
+    const ev = await ctx.waitForEvent('serviceworker', {
+      predicate: isOurSw,
+      timeout: 20_000,
+    }).catch(() => null);
+    if (ev) {
+      sw = ev;
+      traceEnd('3 sw register (event)', { swUrl: ev.url(), via: 'event+predicate' });
     } else {
       traceFail('3 sw register', new Error('SW never registered in 20s'));
       throw new Error('Service worker did not register within 20s. Check .output/chrome-mv3/manifest.json exists and has no syntax errors.');
     }
   }
-
   // Forward SW console + network to the test runner so we can see what's
   // happening. SW pages are also Pages from Playwright's perspective.
   const swLog = (line: string) => {

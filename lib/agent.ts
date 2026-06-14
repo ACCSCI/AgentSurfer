@@ -359,10 +359,12 @@ whether the position changed or the size changed).
 CANCELING: cdpCancel() clears the current highlight without acting.
 Always cancel before re-aiming.
 
-COORDINATE SYSTEM: The cdpAim tool accepts CSS-pixel coordinates.
-Screenshots are at devicePixelRatio scale (e.g., 2x on HiDPI). The
-dpr is reported in cdpAim's result. If you see a target at screenshot
-position (Sx, Sy), convert to CSS with cssX = Sx / dpr, cssY = Sy / dpr.
+COORDINATE SYSTEM: cdpAim / cdpConfirm / cdpClick accept SCREENSHOT
+coordinates — the same units as the BEFORE/AFTER images you see (e.g.,
+device pixels, typically 2x the CSS viewport on HiDPI). Pass the pixel
+coordinates you see directly. The tool converts to CSS internamente using
+the cached dpr — you do NOT need to think about dpr or divide anything.
+The tool result reports the screenshot dimensions for reference.
 
 DEFAULTS: cdpAim defaults to size=200 (large enough to see). cdpAim
 defaults to color='red'. Pick a contrasting color if needed (lime on

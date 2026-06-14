@@ -239,14 +239,27 @@ export class CDPService {
     const view = new DataView(bytes.buffer);
     const width = view.getUint32(16, false);
     const height = view.getUint32(20, false);
+    // Cache dpr so cdpAim / cdpConfirm / cdpClick can convert
+    // screenshot pixels → CSS pixels without re-screenshotting.
+    if (tab.width && width) this.lastDpr = width / tab.width;
     return { dataUrl, width, height };
   }
 
   private lastAimPos: { x: number; y: number } = { x: 0, y: 0 };
+  /**
+   * dpr from the most recent screenshot() call. Computed as
+   * `screenshotWidth / tab.width`. Tools that need to convert
+   * screenshot pixels → CSS pixels (cdpAim / cdpConfirm / cdpClick)
+   * read this. Without this they'd have to take their own screenshot
+   * every call (slow) or use a stale value.
+   */
+  private lastDpr = 1;
 
   /** Get the last aim position (for scroll, etc.). */
   get aimX(): number { return this.lastAimPos.x; }
   get aimY(): number { return this.lastAimPos.y; }
+  /** dpr from the most recent screenshot() — used by tools to convert screenshot px → CSS px. */
+  get dpr(): number { return this.lastDpr; }
 
   // ---------- Visual feedback (CDP Overlay, with LLM-chosen color) ----------
   //

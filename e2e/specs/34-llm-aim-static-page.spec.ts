@@ -25,7 +25,10 @@ const TOOLS = [
   'cdpAim', 'cdpConfirm', 'cdpCancel', 'cdpScreenshot',
 ] as const;
 
-const TARGET_CENTER = { x: 640, y: 400 };
+// After dpr extraction, cdpAim / cdpConfirm / cdpClick take SCREENSHOT
+// pixels. The static page renders at dpr=2, so the green target center
+// (CSS 640, 400) corresponds to screenshot (1280, 800).
+const TARGET_CENTER = { x: 1280, y: 800 };
 
 test('LLM aims at known green target on the static probe page', async () => {
   traceReset();
@@ -59,16 +62,29 @@ test('LLM aims at known green target on the static probe page', async () => {
 
     // The prompt uses the same two-phase pattern as 32-visual-servoing but
     // targets the known green box on the static page.
+    //
+    // NOTE: cdpAim / cdpConfirm / cdpClick now accept SCREENSHOT-PIXEL
+    // coordinates (same as the image dimensions) — the tool converts to
+    // CSS internamente using the cached dpr. So this prompt tells the LLM
+    // to read the green target position directly from the screenshot and
+    // pass those screenshot coordinates — NO divide-by-dpr math.
+    //
+    // The page renders at dpr=2 (1280x800 CSS -> 2560x1600 device),
+    // so the green target center at CSS (640, 400) is at screenshot
+    // (1280, 800). The page also labels every 100 CSS px on the gridlines,
+    // so the LLM can use the labels as ground truth.
     const prompt = [
       'Use tabsList → tabsSwitch to focus the tab at http://localhost:8888/index.html.',
-      'Take a cdpScreenshot. The page has a 200x200 GREEN target box labeled "TARGET @ CSS (540, 300) to (740, 500), center (640, 400)".',
+      'Take a cdpScreenshot. The screenshot is in device pixels (typically 2x the CSS viewport on HiDPI). The page has a 200x200 GREEN target box labeled "TARGET @ CSS (540, 300) to (740, 500), center (640, 400)" — at dpr=2, the screenshot target center is (1280, 800). The gridlines are labeled every 100 CSS px, so you can read coordinates directly off the labels.',
       '',
       'Do TWO-PHASE visual servoing:',
-      'PHASE 1 (fix position, size locked): start with size=200. Look at the AFTER image. If the red box is OFF the green target, cdpCancel and re-aim with corrected x/y (still size=200). Iterate up to 5 rounds.',
-      'PHASE 2 (shrink size, position locked): once the red box covers the green target, shrink size 200→100→50, verifying at each step.',
-      'Then cdpConfirm(x, y) at the converged coordinates.',
+      'PHASE 1 (fix position, size locked): start with size=200. Look at the AFTER image. If the red box is OFF the green target, cdpCancel and re-aim with corrected x/y in the SAME coordinate space (still size=200). Iterate up to 5 rounds.',
+      'PHASE 2 (shrink size, position locked): once the red box covers the green target, shrink size 200->100->50, verifying at each step.',
+      'Then cdpConfirm(x, y) with the same screenshot coordinates you converged on.',
       '',
-      'Report: how many cdpAim calls, the final coordinates, and the offset (in CSS px) from the target center (640, 400).',
+      'IMPORTANT: cdpAim / cdpConfirm / cdpClick take SCREENSHOT-PIXEL coordinates (the same numbers you see in the image). The tool converts to CSS internamente — you do NOT need to divide by dpr.',
+      '',
+      'Report: how many cdpAim calls, the final screenshot coordinates, and the offset (in screenshot pixels) from the target center (1280, 800).',
     ].join('\n');
     await ext.setReactTextareaValue(sidePanel, 'textarea', prompt);
     await sidePanel.locator('button[title="Send"]').click();

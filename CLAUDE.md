@@ -351,18 +351,21 @@ MV3 Service Workers are browser-only — no `Buffer`, no `process`, no `require`
 
 Don't trust it. Get the real DPR from the actual rendered pixel data (PNG IHDR for screenshots, `ImageData.width` for canvas, etc.). For `cdpAim`, the source of truth is `screenshotWidth / tab.width` — both available in the tool's context.
 
-### 7.7 LLM spatial reasoning needs dpr hints + forced iteration
+### 7.7 LLM spatial reasoning — the tool handles dpr, the LLM just looks at pixels
 
 LLMs (including MiniMax-M3) are bad at:
 1. Knowing that screenshots are at devicePixelRatio scale (they assume 1:1)
 2. Converting between screenshot pixels and CSS pixels
 3. Iterating when an aim misses — they often declare success after 1-2 tries
 
-Fix:
-1. Return `dpr`, `screenshotWidth`, `screenshotHeight`, `width` (CSS), `height` (CSS) in EVERY tool result that involves coordinates
-2. State explicitly in the system prompt: "To convert screenshot pixels to CSS pixels, divide by dpr. Tool parameters are CSS pixels."
-3. Force a verify-cancel-re-aim loop: cdpAim returns BEFORE + AFTER images; system prompt says "COMPARE them. If off-target, cdpCancel + cdpAim with corrected coordinates. Iterate until accurate."
-4. Observed convergence: 3 aim rounds brought the LLM from ~200 px off to ~18 px off the search box center.
+**Fix: the tool does the dpr math, the LLM only thinks in screenshot pixels.** `cdpAim`, `cdpConfirm`, `cdpClick` all accept SCREENSHOT coordinates (the same units as the BEFORE/AFTER images). The tool caches the dpr from the most recent `chrome.tabs.captureVisibleTab` call (`CDPService.lastDpr`) and converts internally before calling `Overlay.highlightQuad` / `Input.dispatchMouseEvent`. This removes a whole class of LLM dpr-arithmetic bugs that we hit hard with M2.7.
+
+What the tool result still reports (for transparency, NOT for LLM arithmetic):
+- `screenshotWidth` / `screenshotHeight` — so the LLM knows what coordinate space it's in
+- `dpr` — kept for debugging
+- `width` / `height` (CSS) — kept for debugging
+
+Visual-servoing discipline is still needed — that part of §7.7 is unchanged. Force a verify-cancel-re-aim loop: cdpAim returns BEFORE + AFTER images; the system prompt tells the LLM to COMPARE them. If off-target, cdpCancel + cdpAim with corrected SCREENSHOT coordinates. Iterate until accurate.
 
 ### 7.8 Chrome E2E: the "manifest missing" dialog is almost always an SW register race, not a build issue
 

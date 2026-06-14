@@ -489,17 +489,21 @@ import { getCurrentCDP } from '@/lib/cdp';
 
 export const cdpClick = tool({
   description:
-    'Click at a viewport coordinate (x, y) using native CDP mouse events. Use domQuery first to find the element and get its bounding box, then pass the center coordinates here.',
+    'Click at a SCREENSHOT coordinate (x, y) using native CDP mouse events. Use domQuery first to find the element and get its bounding box, then pass the center coordinates here (in SCREENSHOT pixel space, the same as the image you see).',
   parameters: z.object({
-    x: z.number().int().min(0).describe('Viewport X coordinate'),
-    y: z.number().int().min(0).describe('Viewport Y coordinate'),
+    x: z.number().int().min(0).describe('SCREENSHOT X coordinate (same units as the image you see)'),
+    y: z.number().int().min(0).describe('SCREENSHOT Y coordinate (same units as the image you see)'),
   }),
   execute: async ({ x, y }) => {
     const cdp = getCurrentCDP();
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
-    await cdp.click(x, y);
+    // Convert screenshot px -> CSS px using the cached dpr.
+    const dpr = cdp.dpr;
+    const cssX = Math.round(x / dpr);
+    const cssY = Math.round(y / dpr);
+    await cdp.click(cssX, cssY);
     return { ok: true, x, y };
   },
 });
@@ -574,11 +578,11 @@ export const cdpScreenshot = tool({
 
 export const cdpAim = tool({
   description:
-    'Draw a colored highlight square (crosshair) at viewport coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. This tool AUTOMATICALLY captures a BEFORE screenshot (no crosshair) AND an AFTER screenshot (with crosshair drawn) so you can compare them and decide if the position is correct. If the crosshair is ON target, call cdpConfirm(x, y). If NOT, call cdpCancel() then call cdpAim again with corrected coordinates. MANDATORY verification loop: aim → compare before/after → if off-target, cancel and re-aim → repeat until on target, THEN cdpConfirm. Do NOT call cdpClick directly — always use the aim→confirm flow.\n\nVISUAL SERVOING — two phases, separate position from size:\n  Phase 1 (FIX POSITION, size locked at 200): aim with a large box. Compare BEFORE/AFTER. If target is inside the red box, advance. If off-target, cancel and re-aim with corrected x/y. Keep size=200. Iterate 3-4 rounds until the target is centered.\n  Phase 2 (SHRINK SIZE, position locked): once centered, shrink the box: 200→100→50→20. Verify the target is still fully covered at each size.\n  CRITICAL: never change BOTH x/y and size in the same step. Phase 1 changes only x/y. Phase 2 changes only size. Mixing them makes the visual feedback ambiguous.\n\nCOLOR: pick a color that CONTRASTS with the page background (e.g., red on white, cyan/yellow on dark pages, green on red pages). Defaults to red. CSS names (red/blue/lime/cyan/yellow/magenta/orange/purple/white/black) or #rrggbb.',
+    'Draw a colored highlight square (crosshair) at SCREENSHOT coordinates (x, y) using CDP Overlay, then take a screenshot so you can visually verify the position BEFORE clicking. The x, y, size parameters are in the same coordinate space as the BEFORE/AFTER images you see (screenshot pixel coordinates) — the tool converts to CSS internamente using the cached dpr. You do NOT need to think about dpr. This tool AUTOMATICALLY captures a BEFORE screenshot (no crosshair) AND an AFTER screenshot (with crosshair drawn) so you can compare them and decide if the position is correct. If the crosshair is ON target, call cdpConfirm(x, y) with the same coordinates. If NOT, call cdpCancel() then call cdpAim again with corrected SCREENSHOT coordinates. MANDATORY verification loop: aim -> compare before/after -> if off-target, cancel and re-aim -> repeat until on target, THEN cdpConfirm. Do NOT call cdpClick directly — always use the aim->confirm flow.\n\nVISUAL SERVOING — two phases, separate position from size:\n  Phase 1 (FIX POSITION, size locked at 200): aim with a large box. Compare BEFORE/AFTER. If target is inside the red box, advance. If off-target, cancel and re-aim with corrected x/y. Keep size=200. Iterate 3-4 rounds until the target is centered.\n  Phase 2 (SHRINK SIZE, position locked): once centered, shrink the box: 200->100->50->20. Verify the target is still fully covered at each size.\n  CRITICAL: never change BOTH x/y and size in the same step. Phase 1 changes only x/y. Phase 2 changes only size. Mixing them makes the visual feedback ambiguous.\n\nCOLOR: pick a color that CONTRASTS with the page background (e.g., red on white, cyan/yellow on dark pages, green on red pages). Defaults to red. CSS names (red/blue/lime/cyan/yellow/magenta/orange/purple/white/black) or #rrggbb.',
   parameters: z.object({
-    x: z.number().int().min(0).describe('Viewport X coordinate to aim at (CSS pixels — see coordinate system notes)'),
-    y: z.number().int().min(0).describe('Viewport Y coordinate to aim at (CSS pixels — see coordinate system notes)'),
-    size: z.number().int().min(8).max(400).default(80).describe('Side length of the highlight square in CSS pixels. DEFAULT 80 — must be large enough to see (8px is invisible on HiDPI).'),
+    x: z.number().int().min(0).describe('SCREENSHOT X coordinate to aim at (the same units as the BEFORE/AFTER image you see)'),
+    y: z.number().int().min(0).describe('SCREENSHOT Y coordinate to aim at (the same units as the BEFORE/AFTER image you see)'),
+    size: z.number().int().min(8).max(400).default(80).describe('Side length of the highlight square in SCREENSHOT pixels. DEFAULT 80 — must be large enough to see (8px is invisible on HiDPI).'),
     color: z.string().default('red').describe('CSS color name (red/blue/lime/cyan/yellow/orange/purple/white/black) or #rrggbb. Pick a color contrasting the page background.'),
   }),
   execute: async ({ x, y, size, color }) => {
@@ -589,22 +593,28 @@ export const cdpAim = tool({
     // Pre-screenshot BEFORE drawing the crosshair so the LLM can compare
     // before/after and verify the crosshair actually landed where it asked.
     const before = await cdp.screenshot();
-    await cdp.highlightQuad(x, y, size, color);
+    // x, y, size arrive in SCREENSHOT pixels (what the LLM sees in the
+    // image). Convert to CSS pixels using the cached dpr from the previous
+    // screenshot() call — the LLM never has to think about dpr, DPR, or
+    // any device-vs-CSS distinction.
+    const dpr = cdp.dpr;
+    const cssX = Math.round(x / dpr);
+    const cssY = Math.round(y / dpr);
+    const cssSize = Math.round(size / dpr);
+    await cdp.highlightQuad(cssX, cssY, cssSize, color);
     const after = await cdp.screenshot();
-    // Compute DPR from the ACTUAL screenshot dimensions vs the tab's CSS
-    // viewport dimensions. `window.devicePixelRatio` is unreliable in
-    // Playwright/headless Chrome (often returns 1 even when the screenshot
-    // is 2x). The PNG header is the source of truth.
-    const dpr = tab.width ? after.width / tab.width : 1;
     return {
       dataUrl: after.dataUrl,
       beforeDataUrl: before.dataUrl,
-      width: tab.width ?? 0,            // CSS pixels
-      height: tab.height ?? 0,          // CSS pixels
-      screenshotWidth: after.width,     // device pixels
-      screenshotHeight: after.height,   // device pixels
-      dpr,                              // device pixels per CSS pixel
-      aimX: x,
+      // Report the screenshot dimensions so the LLM knows the coordinate
+      // space it should keep using. dpr and CSS dimensions are kept for
+      // debugging but the LLM is no longer expected to divide by dpr.
+      width: tab.width ?? 0,
+      height: tab.height ?? 0,
+      screenshotWidth: after.width,
+      screenshotHeight: after.height,
+      dpr,
+      aimX: x,                           // screenshot px (matches the caller's intent)
       aimY: y,
       color,
     };
@@ -615,10 +625,10 @@ export const cdpAim = tool({
     aimX: number; aimY: number;
   }) => {
     const text = [
-      `AIMED at CSS pixel (${output.aimX}, ${output.aimY}).`,
-      `Viewport is ${output.width}x${output.height} CSS pixels; devicePixelRatio=${output.dpr}, so screenshot is ${output.width * output.dpr}x${output.height * output.dpr} device pixels.`,
-      `COMPARE the BEFORE and AFTER images: is the red square on your target? If YES → cdpConfirm(${output.aimX}, ${output.aimY}). If NO → cdpCancel() + cdpAim with corrected CSS coordinates.`,
-      `IMPORTANT: You identified the target in the SCREENSHOT (device pixels). To convert back to CSS pixels for cdpAim, divide by dpr (${output.dpr}). For example a screenshot-x of ${640 * output.dpr} = CSS x 640.`,
+      `AIMED at SCREENSHOT pixel (${output.aimX}, ${output.aimY}) on a ${output.screenshotWidth}x${output.screenshotHeight} image.`,
+      `The tool converted your screenshot coordinates to CSS internamente — no dpr math needed.`,
+      `COMPARE the BEFORE and AFTER images: is the red square on your target? If YES -> cdpConfirm(${output.aimX}, ${output.aimY}). If NO -> cdpCancel() + cdpAim with corrected SCREENSHOT coordinates.`,
+      `Always pass the same coordinate space as the image (screenshot pixels).`,
     ].join(' ');
     const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
       { type: 'text', text },
@@ -627,7 +637,7 @@ export const cdpAim = tool({
       content.push({ type: 'text', text: 'BEFORE (no crosshair):' });
       content.push({ type: 'image', data: stripDataUrlPrefix(output.beforeDataUrl), mimeType: 'image/png' });
     }
-    content.push({ type: 'text', text: `AFTER (red crosshair at CSS ${output.aimX}, ${output.aimY}):` });
+    content.push({ type: 'text', text: `AFTER (red crosshair at SCREENSHOT ${output.aimX}, ${output.aimY}):` });
     content.push({ type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' });
     return content;
   },
@@ -635,18 +645,22 @@ export const cdpAim = tool({
 
 export const cdpConfirm = tool({
   description:
-    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — never call cdpClick directly.',
+    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — never call cdpClick directly. The x, y must be in SCREENSHOT pixel space (the same as the cdpAim coordinates).',
   parameters: z.object({
-    x: z.number().int().min(0).describe('Viewport X coordinate (must match the aimed position)'),
-    y: z.number().int().min(0).describe('Viewport Y coordinate (must match the aimed position)'),
+    x: z.number().int().min(0).describe('SCREENSHOT X coordinate (must match the cdpAim coordinates)'),
+    y: z.number().int().min(0).describe('SCREENSHOT Y coordinate (must match the cdpAim coordinates)'),
   }),
   execute: async ({ x, y }) => {
     const cdp = getCurrentCDP();
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
+    // Convert screenshot px -> CSS px using the cached dpr.
+    const dpr = cdp.dpr;
+    const cssX = Math.round(x / dpr);
+    const cssY = Math.round(y / dpr);
     await cdp.clearHighlight();
-    await cdp.click(x, y);
+    await cdp.click(cssX, cssY);
     return { ok: true, x, y };
   },
 });

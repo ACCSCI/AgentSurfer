@@ -286,13 +286,23 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService, run: 
     },
   });
 
-  // 9. Consume stream in background — don't block, just drain.
-  run.warn('consumeStream catch is silent — known bug');
-  result.consumeStream().catch((err) => {
-    run.error('consumeStream error (previously silently caught)', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
+  // 9. Consume stream — AWAIT it so the run doesn't return before the
+  // stream terminates. Otherwise `runAgent` resolves immediately while the
+  // stream is still draining, the side panel sees `runAgent complete`
+  // with zero chunks, and the user gets an empty assistant message.
+  // The previous fire-and-forget `.catch()` was a known-bug: the catch
+  // never fired because the promise stayed pending after the function
+  // returned.
+  try {
+    await result.consumeStream();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    run.error('consumeStream error', { error: msg });
+    // Surface the failure to the side panel so the user sees something.
+    emit({ type: 'agent_error', message: msg });
+    // Re-throw so the caller (background.ts) sees the failure too.
+    throw err;
+  }
 
   // Clean up wall-clock timer.
   if (wallTimer) clearTimeout(wallTimer);

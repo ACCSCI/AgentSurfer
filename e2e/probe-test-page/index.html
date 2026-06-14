@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coord Probe Target Page</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 1280px;
+      height: 800px;
+      background: #ffffff;
+      overflow: hidden;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    body { position: relative; }
+
+    .corner { position: absolute; width: 20px; height: 20px; background: #000000; }
+    .corner-label {
+      position: absolute;
+      font-size: 10px;
+      color: #444444;
+      background: #ffffff;
+      padding: 1px 3px;
+    }
+
+    .gridline { position: absolute; background: #eeeeee; }
+    .gridlabel {
+      position: absolute;
+      font-size: 9px;
+      color: #888888;
+      background: rgba(255, 255, 255, 0.7);
+      padding: 0 2px;
+    }
+
+    .target {
+      position: absolute;
+      left: 540px;
+      top: 300px;
+      width: 200px;
+      height: 200px;
+      background: #4CAF50;
+      border: 2px solid #000000;
+      box-sizing: content-box;
+    }
+    .target-label {
+      position: absolute;
+      left: 540px;
+      top: 270px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #000000;
+      background: #ffffff;
+      padding: 2px 4px;
+    }
+    .target-corner-label {
+      position: absolute;
+      font-size: 10px;
+      color: #000000;
+      background: #ffffff;
+      padding: 1px 3px;
+    }
+    .title-strip {
+      position: absolute;
+      left: 20px;
+      top: 20px;
+      font-size: 11px;
+      color: #222222;
+      background: #ffffff;
+      padding: 4px 6px;
+      border: 1px solid #dddddd;
+    }
+  </style>
+</head>
+<body>
+  <div class="title-strip">
+    Coord Probe Target Page<br>
+    Viewport 1280 x 800 CSS px &middot; Target green box @ (540,300) -&gt; (740,500), center (640, 400)<br>
+    Crosshair is the ONLY red element (drawn by Overlay.highlightQuad).
+  </div>
+
+  <!-- 4 black corner markers -->
+  <div class="corner" style="left: 0; top: 0;"></div>
+  <div class="corner" style="left: 1260px; top: 0;"></div>
+  <div class="corner" style="left: 0; top: 780px;"></div>
+  <div class="corner" style="left: 1260px; top: 780px;"></div>
+
+  <div class="corner-label" style="left: 24px; top: 4px;">(0, 0) TL</div>
+  <div class="corner-label" style="left: 1180px; top: 4px;">(1260, 0) TR</div>
+  <div class="corner-label" style="left: 24px; top: 786px;">(0, 780) BL</div>
+  <div class="corner-label" style="left: 1140px; top: 786px;">(1260, 780) BR</div>
+
+  <!-- Green 200x200 target at known position -->
+  <div class="target-label">TARGET @ CSS (540, 300) to (740, 500) &middot; center (640, 400)</div>
+  <div class="target"></div>
+  <div class="target-corner-label" style="left: 546px; top: 306px;">(540, 300)</div>
+  <div class="target-corner-label" style="left: 692px; top: 306px;">(740, 300)</div>
+  <div class="target-corner-label" style="left: 546px; top: 482px;">(540, 500)</div>
+  <div class="target-corner-label" style="left: 692px; top: 482px;">(740, 500)</div>
+
+  <!-- Grid: vertical lines at x=100,200,...1200 (skip target zone 500-800 labels for clarity) -->
+  <script>
+    (function () {
+      var body = document.body;
+      // Vertical gridlines every 100px from 100..1200
+      for (var x = 100; x < 1280; x += 100) {
+        var v = document.createElement('div');
+        v.className = 'gridline';
+        v.style.left = x + 'px';
+        v.style.top = '0';
+        v.style.width = '1px';
+        v.style.height = '800px';
+        body.appendChild(v);
+      }
+      // Horizontal gridlines every 100px from 100..700
+      for (var y = 100; y < 800; y += 100) {
+        var h = document.createElement('div');
+        h.className = 'gridline';
+        h.style.left = '0';
+        h.style.top = y + 'px';
+        h.style.width = '1280px';
+        h.style.height = '1px';
+        body.appendChild(h);
+      }
+      // Grid coordinate labels: place tiny "(x, y)" at each intersection,
+      // offset slightly so the crosshair readout on top of a label is still
+      // readable. Only every-other intersection to keep the page calm.
+      for (var xi = 0; xi <= 1200; xi += 200) {
+        for (var yi = 0; yi <= 700; yi += 200) {
+          // Skip labels that would overlap the green target
+          if (xi >= 500 && xi <= 800 && yi >= 250 && yi <= 550) continue;
+          var lbl = document.createElement('div');
+          lbl.className = 'gridlabel';
+          lbl.style.left = (xi + 3) + 'px';
+          lbl.style.top = (yi + 3) + 'px';
+          lbl.textContent = '(' + xi + ', ' + yi + ')';
+          body.appendChild(lbl);
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

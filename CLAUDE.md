@@ -353,7 +353,7 @@ Don't trust it. Get the real DPR from the actual rendered pixel data (PNG IHDR f
 
 ### 7.7 LLM spatial reasoning needs dpr hints + forced iteration
 
-LLMs (including MiniMax-M2.7-highspeed) are bad at:
+LLMs (including MiniMax-M3) are bad at:
 1. Knowing that screenshots are at devicePixelRatio scale (they assume 1:1)
 2. Converting between screenshot pixels and CSS pixels
 3. Iterating when an aim misses — they often declare success after 1-2 tries

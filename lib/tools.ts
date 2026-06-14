@@ -61,6 +61,21 @@ function safeExecute<T extends AnyTool>(t: T): T {
 
 // ---------- Helpers ----------
 
+/**
+ * Strip the `data:<mime>;base64,` prefix from a data URL and return the
+ * raw base64 string. AI SDK v4's `ToolResultContent` `image` type's `data`
+ * field is forwarded verbatim to the Anthropic provider, which then puts
+ * it directly into the API's `data` field (per
+ * node_modules/@ai-sdk/anthropic/dist/index.js:291). Anthropic expects
+ * RAW base64 there — not a data URL — so a `data:image/png;base64,iVBORw0…`
+ * value would be rejected (or silently dropped) by the API. Always strip
+ * the prefix before passing to the AI SDK.
+ */
+function stripDataUrlPrefix(dataUrl: string): string {
+  const m = dataUrl.match(/^data:[^;]+;base64,(.*)$/);
+  return m?.[1] ?? dataUrl;
+}
+
 async function getActiveTab(): Promise<chrome.tabs.Tab & { id: number }> {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id) throw new Error('No active tab');
@@ -224,7 +239,7 @@ export const screenshot = tool({
     if (!output.dataUrl) return [{ type: 'text', text: output.error ?? 'Screenshot failed' }];
     return [
       { type: 'text', text: `Screenshot captured (${output.width ?? 0}x${output.height ?? 0}px).` },
-      { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
+      { type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' },
     ];
   },
 });
@@ -550,7 +565,7 @@ export const cdpScreenshot = tool({
     if (!output.dataUrl) return [{ type: 'text', text: output.error ?? 'Screenshot failed' }];
     return [
       { type: 'text', text: `Screenshot captured (${output.width ?? 0}x${output.height ?? 0}px).` },
-      { type: 'image', data: output.dataUrl, mimeType: 'image/png' },
+      { type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' },
     ];
   },
 });
@@ -610,10 +625,10 @@ export const cdpAim = tool({
     ];
     if (output.beforeDataUrl) {
       content.push({ type: 'text', text: 'BEFORE (no crosshair):' });
-      content.push({ type: 'image', data: output.beforeDataUrl, mimeType: 'image/png' });
+      content.push({ type: 'image', data: stripDataUrlPrefix(output.beforeDataUrl), mimeType: 'image/png' });
     }
     content.push({ type: 'text', text: `AFTER (red crosshair at CSS ${output.aimX}, ${output.aimY}):` });
-    content.push({ type: 'image', data: output.dataUrl, mimeType: 'image/png' });
+    content.push({ type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' });
     return content;
   },
 });

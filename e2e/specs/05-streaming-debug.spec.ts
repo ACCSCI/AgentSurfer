@@ -23,7 +23,7 @@ test('streaming debug: periodic screenshots every 2s', async () => {
     // Seed MiniMax config.
     await ext.seedLiveConfig(sp, 'MiniMax', apiKey);
     await sp.reload();
-    await sp.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 10_000 });
+    await sp.waitForSelector('text=MiniMax-M3', { timeout: 10_000 });
 
     // Screenshot 0: before sending.
     await sp.screenshot({ path: 'test-results/stream-0-before.png' });

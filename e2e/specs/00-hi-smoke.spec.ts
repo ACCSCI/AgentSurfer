@@ -23,7 +23,7 @@ test.describe('hi smoke (10s budget)', () => {
       await sidePanel.waitForSelector('text=AgentSurfer');
       await ext.seedLiveConfig(sidePanel, 'MiniMax', apiKey);
       await sidePanel.reload();
-      await sidePanel.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 10_000 });
+      await sidePanel.waitForSelector('text=MiniMax-M3', { timeout: 10_000 });
 
       // Set value via React-friendly native setter.
       await sidePanel.locator('textarea').evaluate((el, v) => {

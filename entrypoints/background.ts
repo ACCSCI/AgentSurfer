@@ -55,7 +55,8 @@ type IncomingMessage =
   | { type: '__e2e:list-messages' }
   | { type: '__e2e:highlight-rect'; tabId: number; x: number; y: number; width: number; height: number; color: string; keepMs?: number }
   | { type: '__e2e:cdp-debug'; tabId: number; x: number; y: number; color: string; size: number }
-  | { type: '__e2e:coord-mapping'; tabId: number };
+  | { type: '__e2e:coord-mapping'; tabId: number }
+  | { type: '__e2e:overlay-probe'; tabId: number };
 
 async function handleMessage(
   message: IncomingMessage,
@@ -506,6 +507,142 @@ async function handleMessage(
         });
       });
 
+      return out;
+    }
+
+    case '__e2e:overlay-probe': {
+      // Pure diagnostic: at 5 known CSS points on a single tab, draw
+      // Overlay.highlightQuad with size=100, capture a screenshot, and
+      // return both the image and the source-of-truth viewport metrics
+      // (tabInfo from chrome.tabs.get + Page.getLayoutMetrics from CDP)
+      // so a downstream analyzer can compare requested vs actual bbox
+      // positions and locate where any coordinate transform is happening.
+      //
+      // No production tool is touched. No LLM is called. No prompt or
+      // fallback is changed. This handler exists only to expose the
+      // raw Overlay behavior for inspection.
+      //
+      // Wait ordering matches `__e2e:coord-mapping`:
+      //   draw → 100ms → (if i>0) 350ms → capture
+      // The 350ms gap keeps us under MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND.
+      const { tabId } = message as { tabId: number };
+      const out: Record<string, unknown> = {};
+
+      // 1. tabInfo — what cdpAim uses for width/height
+      try {
+        out.tabInfo = await chrome.tabs.get(tabId);
+      } catch (err) {
+        out.tabInfo = { error: err instanceof Error ? err.message : String(err) };
+      }
+
+      // 2. Attach debugger. Treat "already attached" as success.
+      try {
+        await chrome.debugger.attach({ tabId }, '1.3');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!msg.includes('Another debugger') && !msg.includes('Already attached')) {
+          return { ...out, attachError: msg };
+        }
+      }
+
+      // 3. Enable DOM + Overlay. DOM MUST come first (cdp.ts:276).
+      try { await chrome.debugger.sendCommand({ tabId }, 'DOM.enable'); } catch (e) {
+        out.domEnableError = e instanceof Error ? e.message : String(e);
+      }
+      try { await chrome.debugger.sendCommand({ tabId }, 'Overlay.enable'); } catch (e) {
+        out.overlayEnableError = e instanceof Error ? e.message : String(e);
+      }
+
+      // 4. Page.getLayoutMetrics — the CDP source of truth for the
+      //    layout + visual viewport, independent of chrome.tabs.get.
+      try {
+        out.layoutMetrics = await chrome.debugger.sendCommand<Record<string, unknown>>(
+          { tabId }, 'Page.getLayoutMetrics',
+        );
+      } catch (err) {
+        out.layoutMetrics = { error: err instanceof Error ? err.message : String(err) };
+      }
+
+      // 5. Activate the tab once (captureVisibleTab requires it). Then
+      //    loop the 5 points, drawing + capturing for each.
+      try {
+        const tab0 = await chrome.tabs.get(tabId);
+        if (tab0.windowId != null && !tab0.active) {
+          await chrome.tabs.update(tabId, { active: true });
+        }
+      } catch {}
+
+      const points: Array<{ x: number; y: number }> = [
+        { x: 0,   y: 0   },
+        { x: 100, y: 100 },
+        { x: 200, y: 200 },
+        { x: 400, y: 400 },
+        { x: 800, y: 400 },
+      ];
+      const size = 100;
+      const shots: Array<{
+        requested: { x: number; y: number; size: number };
+        params: { quad: number[]; color: { r: number; g: number; b: number; a: number }; outlineColor: { r: number; g: number; b: number; a: number } };
+        dataUrl?: string;
+        sizeKB?: number;
+        error?: string;
+      }> = [];
+
+      for (const [i, p] of points.entries()) {
+        // Quad centered at (p.x, p.y) with side = size — EXACTLY the
+        // construction used by lib/cdp.ts:337-342. This makes the probe
+        // a faithful reproduction of cdpAim's Overlay.highlightQuad call.
+        const half = size / 2;
+        const quad = [
+          p.x - half, p.y - half,   // tl
+          p.x + half, p.y - half,   // tr
+          p.x + half, p.y + half,   // br
+          p.x - half, p.y + half,   // bl
+        ];
+        const params = {
+          quad,
+          color: { r: 255, g: 0, b: 0, a: 0.5 },
+          outlineColor: { r: 255, g: 255, b: 255, a: 1 },
+        };
+        try {
+          await chrome.debugger.sendCommand({ tabId }, 'Overlay.highlightQuad', params);
+        } catch (err) {
+          shots.push({
+            requested: { x: p.x, y: p.y, size },
+            params,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          continue;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+        if (i > 0) await new Promise((r) => setTimeout(r, 350));
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (tab.windowId == null) throw new Error('no windowId');
+          if (!tab.active) await chrome.tabs.update(tabId, { active: true });
+          await new Promise((r) => setTimeout(r, 50));
+          const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+          shots.push({
+            requested: { x: p.x, y: p.y, size },
+            params,
+            dataUrl,
+            sizeKB: Math.round(dataUrl.length / 1024),
+          });
+        } catch (err) {
+          shots.push({
+            requested: { x: p.x, y: p.y, size },
+            params,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      // 6. Cleanup: hideHighlight + disable overlay. We deliberately
+      //    leave the debugger attached (matches `__e2e:coord-mapping`).
+      try { await chrome.debugger.sendCommand({ tabId }, 'Overlay.hideHighlight'); } catch {}
+      try { await chrome.debugger.sendCommand({ tabId }, 'Overlay.disable'); } catch {}
+
+      out.shots = shots;
       return out;
     }
 

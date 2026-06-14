@@ -31,7 +31,7 @@ test('Simple aim: LLM aims at Bing search box, we verify crosshair in screenshot
     await ext.resetDb(sidePanel);
     await ext.seedLiveConfig(sidePanel, 'MiniMax', apiKey);
     await sidePanel.reload();
-    await sidePanel.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 15_000 });
+    await sidePanel.waitForSelector('text=MiniMax-M3', { timeout: 15_000 });
     await ext.enableOnlyTools(sidePanel, TOOLS);
 
     // Pre-open bing.com in a Playwright page. The LLM will see it via

@@ -77,7 +77,7 @@ test.describe('real-task closed-loop', () => {
       await sidePanel.waitForSelector('text=AgentSurfer');
       await ext.seedLiveConfig(sidePanel, 'MiniMax', apiKey);
       await sidePanel.reload();
-      await sidePanel.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 10_000 });
+      await sidePanel.waitForSelector('text=MiniMax-M3', { timeout: 10_000 });
 
       // NOTE: We deliberately do NOT pre-navigate to google.com. The agent
       // is expected to call tabsList / tabsSwitch / tabsOpen to manage its

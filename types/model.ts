@@ -46,9 +46,14 @@ export const DefaultModelId: Record<Provider, string> = {
   'openai-compatible-1': '',
   'openai-compatible-2': '',
   mimo: 'mimo-v2.5-pro',
-  // M2.7-highspeed is the project default per the user's request — fast,
-  // stable, supported by the Anthropic-compat endpoint.
-  MiniMax: 'MiniMax-M2.7-highspeed',
+  // M3 is the project default — it's the only MiniMax model in the
+  // Anthropic-compat endpoint that supports image input (per
+  // platform.minimaxi.com/docs/api-reference/text-anthropic-api). M2.7
+  // and earlier accept text + tool_use/tool_result only — any image
+  // content block is silently dropped, which was the root cause of the
+  // "aim in bottom-right" bug (the LLM was hallucinating with no
+  // visual feedback).
+  MiniMax: 'MiniMax-M3',
   // `mock:happy` is the default scripted run used by E2E specs.
   mock: 'mock:happy',
 };
@@ -76,6 +81,7 @@ export const ALL_TOOLS = [
   'domClick',
   'domType',
   'pressKey',
+  'todo',
 ] as const;
 export type ToolName = (typeof ALL_TOOLS)[number];
 

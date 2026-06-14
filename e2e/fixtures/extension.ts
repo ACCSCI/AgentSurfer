@@ -272,7 +272,7 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
           id: configId,
           name: `${provider} (live E2E)`,
           provider,
-          modelId: provider === 'MiniMax' ? 'MiniMax-M2.7-highspeed' : 'mimo-v2.5-pro',
+          modelId: provider === 'MiniMax' ? 'MiniMax-M3' : 'mimo-v2.5-pro',
           apiKey,
           baseUrl: null,
           isDefault: true,

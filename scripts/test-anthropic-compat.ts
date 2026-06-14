@@ -16,7 +16,7 @@ if (!apiKey) {
 
 console.log('provider: @ai-sdk/anthropic (v1) with custom baseURL');
 console.log('baseURL:  https://api.minimaxi.com/anthropic/v1');
-console.log('model:    MiniMax-M2.7-highspeed');
+console.log('model:    MiniMax-M3');
 console.log('sending "hi"…');
 
 const anthropic = createAnthropic({
@@ -31,7 +31,7 @@ const started = Date.now();
 
 try {
   const result = streamText({
-    model: anthropic('MiniMax-M2.7-highspeed'),
+    model: anthropic('MiniMax-M3'),
     system: 'You are a helpful assistant. Be brief.',
     prompt: 'hi',
     onError: ({ error }) => console.error('[onError]', error),

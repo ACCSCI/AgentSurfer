@@ -24,7 +24,7 @@ test('Diagnostic: full Overlay debug output', async () => {
     await ext.resetDb(sidePanel);
     await ext.seedLiveConfig(sidePanel, 'MiniMax', apiKey);
     await sidePanel.reload();
-    await sidePanel.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 15_000 });
+    await sidePanel.waitForSelector('text=MiniMax-M3', { timeout: 15_000 });
 
     // Open a real bing tab via Playwright (same browser context).
     const bingPage = await ext.ctx.newPage();

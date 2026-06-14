@@ -19,7 +19,7 @@ if (!apiKey) {
 // Patch the provider to use the env key (the official `minimax` factory
 // reads from MINIMAX_API_KEY by default; we don't need to set anything else).
 console.log('provider: minimax (Anthropic-compat)');
-console.log('model: MiniMax-M2.7-highspeed');
+console.log('model: MiniMax-M3');
 console.log('sending "hi"…');
 
 let chunkCount = 0;
@@ -29,7 +29,7 @@ const started = Date.now();
 
 try {
   const result = streamText({
-    model: minimax('MiniMax-M2.7-highspeed'),
+    model: minimax('MiniMax-M3'),
     system: 'You are a helpful assistant. Be brief.',
     prompt: 'hi',
     onError: ({ error }) => console.error('[onError]', error),

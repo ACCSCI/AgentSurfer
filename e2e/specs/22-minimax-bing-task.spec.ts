@@ -36,7 +36,7 @@ test('MiniMax live: Bing search LLM, click 3 links, summarize, cleanup', async (
     await ext.resetDb(sidePanel);
     await ext.seedLiveConfig(sidePanel, 'MiniMax', apiKey);
     await sidePanel.reload();
-    await sidePanel.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 15_000 });
+    await sidePanel.waitForSelector('text=MiniMax-M3', { timeout: 15_000 });
 
     await ext.enableOnlyTools(sidePanel, CORE_TOOLS);
 

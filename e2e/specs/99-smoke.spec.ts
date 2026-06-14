@@ -22,7 +22,7 @@ test('seed + hi reply', async () => {
         id: `e2e-${provider}-${Date.now()}`,
         name: `${provider} (E2E)`,
         provider,
-        modelId: 'MiniMax-M2.7-highspeed',
+        modelId: 'MiniMax-M3',
         apiKey,
         baseUrl: null,
         isDefault: true,

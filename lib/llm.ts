@@ -28,6 +28,7 @@ export const KnownModels: Record<Provider, readonly string[]> = {
   'openai-compatible-2': [],
   mimo: ['mimo-v2.5-pro'],
   MiniMax: [
+    'MiniMax-M3',
     'MiniMax-M2.7',
     'MiniMax-M2.7-highspeed',
     'MiniMax-M2.5',

@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AgentSurfer 4-Level Test Game</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; background: #f5f5f5;
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+    #game-container {
+      width: 1280px; height: 800px;
+      margin: 0 auto;
+      background: #ffffff;
+      box-shadow: 0 0 12px rgba(0,0,0,0.08);
+    }
+    /* Hidden input — captures keyboard from cdpType. Not interactable via
+       DOM mouse events (pointer-events:none); agent must focus it via the
+       canvas-drawn input box (Level 3). */
+    #__game_input {
+      position: absolute;
+      left: 0; top: 0;
+      width: 1px; height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body data-level="loading">
+  <div id="game-container"></div>
+  <input id="__game_input" type="text" tabindex="-1"
+         autocomplete="off" spellcheck="false" aria-hidden="true">
+
+  <script type="module">
+    // PixiJS v8 ESM build (vendored). 779KB minified.
+    // Use absolute path so the import works whether the page is opened at
+    // "/" (default route) or "/e2e/fixtures/test-game/index.html".
+    import { Application, Container, Graphics, Text, TextStyle } from '/e2e/fixtures/test-game/vendor/pixi.min.mjs';
+
+    // ===========================================================================
+    // Constants
+    // ===========================================================================
+
+    const W = 1280;
+    const H = 800;
+    const TARGET_TEXT = 'HELLO_AGENT_2026';
+
+    // Color palette
+    const COLORS = {
+      red:    0xE53935,
+      blue:   0x1E88E5,
+      green:  0x43A047,
+      black:  0x212121,
+      gray:   0x9E9E9E,
+      light:  0xF5F5F5,
+      border: 0x212121,
+      focusBlue: 0x1E88E5,
+      flashRed:  0xE53935,
+    };
+
+    // Game state
+    const state = {
+      level: 0,            // 0=intro, 1..4, 5=done
+      l1: { expected: 1, balls: [] },
+      l2: { blinkId: null, solidId: null, balls: [] },
+      l3: { inputActive: false, typed: '', target: TARGET_TEXT },
+      l4: { balls: [], boxes: [], mapping: null, dragging: null },
+      transitionTimer: null,
+    };
+
+    // ===========================================================================
+    // Helpers
+    // ===========================================================================
+
+    function setLevel(value) {
+      document.body.dataset.level = value;
+      console.log(`[GAME] level=${value}`);
+    }
+
+    function logPass(n) {
+      console.log(`[LEVEL ${n} PASSED]`);
+    }
+
+    function delay(ms) {
+      return new Promise((r) => setTimeout(r, ms));
+    }
+
+    function randInt(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    /** Distance between two points. */
+    function dist(ax, ay, bx, by) {
+      return Math.hypot(ax - bx, ay - by);
+    }
+
+    /** Build a ball Graphics (filled circle with thick black border). */
+    function makeBall(x, y, radius, color) {
+      const g = new Graphics();
+      g.circle(0, 0, radius).fill(color).stroke({ color: COLORS.black, width: 3, alignment: 0 });
+      g.x = x;
+      g.y = y;
+      g.eventMode = 'static';
+      g.cursor = 'pointer';
+      return g;
+    }
+
+    /** Build a Text node centered at (0,0) for placing inside balls. */
+    function makeBallLabel(text, color = '#ffffff') {
+      const style = new TextStyle({
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: 36,
+        fontWeight: 'bold',
+        fill: color,
+        align: 'center',
+      });
+      const t = new Text({ text, style });
+      t.anchor.set(0.5);
+      return t;
+    }
+
+    // ===========================================================================
+    // PixiJS application
+    // ===========================================================================
+
+    const container = new Container(); // Persistent root for level rendering.
+    const overlayContainer = new Container(); // Always-on-top (e.g. focus borders, success flash).
+
+    const app = new Application();
+    await app.init({
+      width: W,
+      height: H,
+      background: 0xffffff,
+      antialias: true,
+      resolution: 2,       // match probe-test-page dpr=2
+      autoDensity: true,
+    });
+    document.getElementById('game-container').appendChild(app.canvas);
+    app.stage.addChild(container);
+    app.stage.addChild(overlayContainer);
+
+    /** Clear the level container, leaving the overlay intact. */
+    function clearLevel() {
+      container.removeChildren().forEach((c) => c.destroy({ children: true }));
+    }
+
+    function clearOverlay() {
+      overlayContainer.removeChildren().forEach((c) => c.destroy({ children: true }));
+    }
+
+    // ===========================================================================
+    // L1 — Click 9 numbered balls in order (1 → 9)
+    // ===========================================================================
+    //
+    // 9 balls arranged in a 3×3 grid. Each ball has a number 1-9 inside it;
+    // the number→position mapping is randomized each level so the agent
+    // can't memorize positions. Colors also cycle (3-color palette) so
+    // the agent has to read the digit, not the color. Wrong order = reset.
+
+    const L1_BALL_COUNT = 9;
+    const L1_BALL_R = 40;
+    const L1_BALL_GRID = [
+      { x: 320, y: 200 },
+      { x: 640, y: 200 },
+      { x: 960, y: 200 },
+      { x: 320, y: 400 },
+      { x: 640, y: 400 },
+      { x: 960, y: 400 },
+      { x: 320, y: 600 },
+      { x: 640, y: 600 },
+      { x: 960, y: 600 },
+    ];
+    const L1_COLOR_CYCLE = [COLORS.black, COLORS.red, COLORS.blue];
+
+    function buildL1() {
+      clearLevel();
+      clearOverlay();
+      setLevel('playing-1');
+
+      // Build palette: each ball has a number 1..9 and cycles through
+      // 3 colors so the agent must read the digit, not the hue.
+      const palette = [];
+      for (let i = 0; i < L1_BALL_COUNT; i++) {
+        palette.push({
+          color: L1_COLOR_CYCLE[i % L1_COLOR_CYCLE.length],
+          label: String(i + 1),
+        });
+      }
+      // Fisher-Yates shuffle so number→position is random each level.
+      for (let i = palette.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [palette[i], palette[j]] = [palette[j], palette[i]];
+      }
+
+      state.l1 = { expected: 1, balls: [] };
+      palette.forEach((entry, i) => {
+        const pos = L1_BALL_GRID[i];
+        const ball = makeBall(pos.x, pos.y, L1_BALL_R, entry.color);
+        const label = makeBallLabel(entry.label);
+        ball.addChild(label);
+        ball.on('pointertap', () => onL1Click(entry.label, ball));
+        container.addChild(ball);
+        state.l1.balls.push({ ball, label: entry.label, color: entry.color });
+      });
+
+      // Title
+      const title = new Text({
+        text: `LEVEL 1 — ${L1_BALL_COUNT} balls numbered 1-${L1_BALL_COUNT}. Click them in order: 1, 2, 3, ...`,
+        style: new TextStyle({
+          fontFamily: 'system-ui, sans-serif',
+          fontSize: 22,
+          fontWeight: 'bold',
+          fill: 0x212121,
+        }),
+      });
+      title.x = 40;
+      title.y = 40;
+      container.addChild(title);
+    }
+
+    async function onL1Click(clickedLabel, ball) {
+      const expected = String(state.l1.expected);
+      if (clickedLabel === expected) {
+        // Correct. Flash green and disable further clicks on this ball.
+        ball.removeAllListeners();
+        const flash = new Graphics();
+        flash.circle(0, 0, 40).fill(0x4CAF50).stroke({ color: COLORS.black, width: 3, alignment: 0 });
+        flash.x = ball.x;
+        flash.y = ball.y;
+        container.addChild(flash);
+        await delay(200);
+        state.l1.expected += 1;
+        if (state.l1.expected > L1_BALL_COUNT) {
+          await passLevel(1);
+        }
+      } else {
+        // Wrong — red flash on the wrong ball, then reset.
+        const flash = new Graphics();
+        flash.circle(0, 0, 40).fill(COLORS.flashRed).stroke({ color: COLORS.black, width: 3, alignment: 0 });
+        flash.x = ball.x;
+        flash.y = ball.y;
+        overlayContainer.addChild(flash);
+        await delay(600);
+        overlayContainer.removeChild(flash);
+        buildL1();
+      }
+    }
+
+    // ===========================================================================
+    // L2 — Click the blinking one (1 blinker + 14 solids, all same color)
+    // ===========================================================================
+    //
+    // 15 balls total in a 3×5 grid: 1 blinks (alpha 0.3 ↔ 1.0 over 1500ms),
+    // 14 stay solid. All same color so the agent can't tell them apart by
+    // hue — it must observe the alpha change across multiple screenshots.
+    // Random-click success rate is 1/15 ≈ 7%, so brute-force is hopeless.
+
+    const L2_BALL_COUNT = 15;
+    const L2_BALL_R = 40;
+    // 3 rows × 5 columns, vertically distributed across the canvas.
+    const L2_BALL_GRID = [];
+    for (const y of [200, 400, 600]) {
+      for (const x of [200, 400, 600, 800, 1000]) {
+        L2_BALL_GRID.push({ x, y });
+      }
+    }
+
+    function buildL2() {
+      clearLevel();
+      clearOverlay();
+      setLevel('playing-2');
+
+      // Pick a random grid index to be the blinker.
+      const blinkIdx = Math.floor(Math.random() * L2_BALL_COUNT);
+      const balls = [];
+      L2_BALL_GRID.forEach((pos, i) => {
+        const ball = makeBall(pos.x, pos.y, L2_BALL_R, COLORS.red);
+        ball.id = String(i);
+        ball.on('pointertap', () => onL2Click(ball.id, ball));
+        container.addChild(ball);
+        balls.push(ball);
+      });
+      state.l2 = {
+        blinkId: String(blinkIdx),
+        balls,
+      };
+
+      // Title
+      const title = new Text({
+        text: `LEVEL 2 — ${L2_BALL_COUNT} balls, one blinks, the rest are solid. Click the blinking one.`,
+        style: new TextStyle({
+          fontFamily: 'system-ui, sans-serif',
+          fontSize: 22,
+          fontWeight: 'bold',
+          fill: 0x212121,
+        }),
+      });
+      title.x = 40;
+      title.y = 40;
+      container.addChild(title);
+
+      // Hint: tell the agent to take 2 screenshots and compare alpha.
+      const hint = new Text({
+        text: 'Tip: take 2 cdpScreenshot calls ~600ms apart and compare each ball\'s alpha.',
+        style: new TextStyle({
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          fontSize: 13,
+          fill: 0x666666,
+        }),
+      });
+      hint.x = 40;
+      hint.y = 76;
+      container.addChild(hint);
+
+      // Blink modulation — only the blinker oscillates; solids stay at 1.0.
+      // 1500ms cycle: 750ms @ alpha 1.0, 750ms @ alpha 0.3.
+      const cycle = 1500;
+      const t0 = performance.now();
+      const onAlpha = 1.0;
+      const offAlpha = 0.3;
+      const blinker = balls[blinkIdx];
+      const tickerFn = () => {
+        const elapsed = (performance.now() - t0) % cycle;
+        const phaseOn = elapsed < (cycle / 2);
+        blinker.alpha = phaseOn ? onAlpha : offAlpha;
+        document.body.dataset.blinkPhase = phaseOn ? 'on' : 'off';
+      };
+      app.ticker.add(tickerFn);
+      state.l2._tickerFn = tickerFn;
+    }
+
+    async function onL2Click(ballId, ball) {
+      // Stop the blink ticker before we tear down L2.
+      if (state.l2._tickerFn) app.ticker.remove(state.l2._tickerFn);
+      if (ballId === state.l2.blinkId) {
+        // Correct regardless of current alpha phase.
+        ball.removeAllListeners();
+        const flash = new Graphics();
+        flash.circle(0, 0, 40).fill(0x4CAF50).stroke({ color: COLORS.black, width: 3, alignment: 0 });
+        flash.x = ball.x; flash.y = ball.y;
+        container.addChild(flash);
+        await delay(300);
+        await passLevel(2);
+      } else {
+        // Wrong ball — reset.
+        const flash = new Graphics();
+        flash.circle(0, 0, 40).fill(COLORS.flashRed).stroke({ color: COLORS.black, width: 3, alignment: 0 });
+        flash.x = ball.x; flash.y = ball.y;
+        overlayContainer.addChild(flash);
+        await delay(600);
+        overlayContainer.removeChild(flash);
+        buildL2();
+      }
+    }
+
+    // ===========================================================================
+    // L3 — Type and submit
+    // ===========================================================================
+
+    function buildL3() {
+      clearLevel();
+      clearOverlay();
+      setLevel('playing-3');
+
+      // Layout (CSS px = same as screenshot px because canvas is dpr=2,
+      // but PixiJS coords are in CSS px by default with autoDensity=true):
+      //   Instruction (top)         y=120
+      //   Input box (focusable)     (440, 220) → (840, 300), 400x80
+      //   Submit button             (560, 360) → (720, 420), 160x60
+      const inputX = 440, inputY = 220, inputW = 400, inputH = 80;
+      const submitX = 560, submitY = 360, submitW = 160, submitH = 60;
+
+      state.l3 = { inputActive: false, typed: '', target: TARGET_TEXT, inputBounds: { inputX, inputY, inputW, inputH }, submitBounds: { submitX, submitY, submitW, submitH } };
+
+      // Title
+      const title = new Text({
+        text: 'LEVEL 3 — Type the text below into the input box, then click Submit.',
+        style: new TextStyle({
+          fontFamily: 'system-ui, sans-serif',
+          fontSize: 20,
+          fontWeight: 'bold',
+          fill: 0x212121,
+        }),
+      });
+      title.x = 40; title.y = 40;
+      container.addChild(title);
+
+      // Instruction: show the target string
+      const instr = new Text({
+        text: `Type exactly: "${TARGET_TEXT}"`,
+        style: new TextStyle({
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          fontSize: 22,
+          fill: 0x212121,
+        }),
+      });
+      instr.x = 40; instr.y = 100;
+      container.addChild(instr);
+
+      // Input box (drawn as a Graphics rect)
+      const inputRect = new Graphics();
+      drawInputBox(inputRect, false);
+      inputRect.x = 0; inputRect.y = 0;
+      inputRect.eventMode = 'static';
+      inputRect.cursor = 'text';
+      inputRect.on('pointertap', () => onL3InputClick());
+      container.addChild(inputRect);
+
+      // Input text display
+      const inputText = new Text({
+        text: '',
+        style: new TextStyle({
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          fontSize: 26,
+          fill: 0x212121,
+        }),
+      });
+      inputText.x = inputX + 12;
+      inputText.y = inputY + 24;
+      inputText.eventMode = 'none';
+      container.addChild(inputText);
+      state.l3._inputRect = inputRect;
+      state.l3._inputText = inputText;
+
+      // Submit button
+      const submitBtn = new Graphics();
+      drawSubmitButton(submitBtn, false);
+      submitBtn.x = 0; submitBtn.y = 0;
+      submitBtn.eventMode = 'static';
+      submitBtn.cursor = 'pointer';
+      submitBtn.on('pointertap', () => onL3SubmitClick());
+      container.addChild(submitBtn);
+      state.l3._submitBtn = submitBtn;
+    }
+
+    function drawInputBox(g, focused) {
+      g.clear();
+      const { inputX, inputY, inputW, inputH } = state.l3.inputBounds;
+      g.rect(inputX, inputY, inputW, inputH)
+       .fill(0xffffff)
+       .stroke({ color: focused ? COLORS.focusBlue : COLORS.gray, width: focused ? 4 : 2, alignment: 0 });
+    }
+
+    function drawSubmitButton(g, hover) {
+      g.clear();
+      const { submitX, submitY, submitW, submitH } = state.l3.submitBounds;
+      g.rect(submitX, submitY, submitW, submitH)
+       .fill(hover ? 0x1E88E5 : 0x1565C0)
+       .stroke({ color: COLORS.black, width: 2, alignment: 0 });
+      // Label
+      // (We draw text as a separate Text node to avoid Graphics text perf issues.)
+    }
+
+    async function onL3InputClick() {
+      state.l3.inputActive = true;
+      // Focus the hidden DOM input — receives cdpType keyboard events.
+      const input = document.getElementById('__game_input');
+      input.focus();
+      // Redraw with focused border
+      drawInputBox(state.l3._inputRect, true);
+    }
+
+    async function onL3SubmitClick() {
+      const typed = state.l3.typed;
+      if (typed === state.l3.target) {
+        await passLevel(3);
+      } else {
+        // Flash submit button red
+        const flash = new Graphics();
+        const { submitX, submitY, submitW, submitH } = state.l3.submitBounds;
+        flash.rect(submitX, submitY, submitW, submitH).fill(COLORS.flashRed).stroke({ color: COLORS.black, width: 2, alignment: 0 });
+        overlayContainer.addChild(flash);
+        await delay(600);
+        overlayContainer.removeChild(flash);
+        // Don't reset — let the agent fix the typed text. But the input is
+        // already populated, so the agent should just re-click submit.
+        // For the "honest path" we don't need to clear; agent can observe
+        // typed text in screenshot and re-submit.
+      }
+    }
+
+    // Global keydown listener — routes characters to the hidden input.
+    // The hidden input's `value` is the source of truth; we mirror to
+    // state.l3.typed and re-render the canvas text.
+    const hiddenInput = document.getElementById('__game_input');
+    hiddenInput.addEventListener('input', () => {
+      state.l3.typed = hiddenInput.value;
+      if (state.l3._inputText) {
+        state.l3._inputText.text = hiddenInput.value;
+      }
+    });
+
+    // ===========================================================================
+    // L4 — Drag 6 balls (2 of each color) into 3 matching-color boxes
+    // ===========================================================================
+    //
+    // Behaviors (per user spec):
+    //   - Once a ball is dropped, it stays put (no auto-return to start).
+    //   - Dropping a ball inside a box does NOT auto-center it.
+    //   - Balls are always draggable — the agent can pick one up out of a
+    //     box and drag it elsewhere (no "locked" state).
+    //   - During drag, ball position is clamped to the canvas bounds only
+    //     (i.e., "stops at boundary" = canvas edge clamp, not box-wall
+    //     clamp). The box walls are visual, not physical. The agent is
+    //     free to move balls in and out of boxes.
+    //   - Each box is sized to JUST fit 2 balls (200×200 with 80-diameter
+    //     balls = 2 balls side-by-side with a 40px gap).
+    //   - Pass: ALL 6 balls have their CENTER inside their target-color
+    //     box, AND the ball center is at least MARGIN px away from any
+    //     box edge (so balls don't "press on the line").
+    //
+    // Box labels are shuffled each run (so the agent must read them from
+    // the canvas, not memorize box positions).
+
+    const L4_BOX_SIZE = 200;
+    const L4_BALL_R = 40;
+    const L4_BOX_Y = 560;
+    const L4_BOX_XS = [320, 640, 960];
+    // 2 rows of 3 balls each, in the upper half of the canvas.
+    const L4_BALL_POSITIONS = [
+      { x: 320, y: 180 },
+      { x: 640, y: 180 },
+      { x: 960, y: 180 },
+      { x: 320, y: 320 },
+      { x: 640, y: 320 },
+      { x: 960, y: 320 },
+    ];
+    // Ball center must be at least this far inside the box on every side
+    // to count as "not pressing on the line".
+    //   inner usable = halfBox - ballR - margin
+    //                = 100   - 40     - 5      = 55
+    // So ball center must satisfy |dx| ≤ 55 AND |dy| ≤ 55 to pass.
+    const L4_PASS_MARGIN = 5;
+
+    function buildL4() {
+      clearLevel();
+      clearOverlay();
+      setLevel('playing-4');
+
+      // Shuffle box labels so the agent can't memorize "box at x=320 is RED".
+      const labelToColor = { RED: COLORS.red, BLUE: COLORS.blue, GREEN: COLORS.green };
+      const allLabels = ['RED', 'BLUE', 'GREEN'];
+      for (let i = allLabels.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [allLabels[i], allLabels[j]] = [allLabels[j], allLabels[i]];
+      }
+      // Box at xs[i] shows labels[i] and accepts color = labelToColor[labels[i]].
+      const boxes = L4_BOX_XS.map((x, i) => ({
+        x,
+        y: L4_BOX_Y,
+        label: allLabels[i],
+        accepted: labelToColor[allLabels[i]],
+      }));
+
+      // Title
+      const title = new Text({
+        text: 'LEVEL 4 — Drag each ball into the box whose label matches its color (2 per box).',
+        style: new TextStyle({
+          fontFamily: 'system-ui, sans-serif',
+          fontSize: 20,
+          fontWeight: 'bold',
+          fill: 0x212121,
+        }),
+      });
+      title.x = 40; title.y = 40;
+      container.addChild(title);
+
+      // Hint at top right: show the pass margin in CSS px for the agent.
+      const hint = new Text({
+        text: `Pass: ball center must be ≥ ${L4_PASS_MARGIN}px inside box edge`,
+        style: new TextStyle({
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          fontSize: 12,
+          fill: 0x666666,
+        }),
+      });
+      hint.x = 40;
+      hint.y = 72;
+      container.addChild(hint);
+
+      // Draw boxes + their text labels. Drawn FIRST so balls render on top
+      // (so balls can obscure the text — forces agent to memorize labels
+      // or read them quickly before placing balls).
+      const boxGfx = [];
+      boxes.forEach((b) => {
+        const g = new Graphics();
+        g.rect(b.x - L4_BOX_SIZE / 2, b.y - L4_BOX_SIZE / 2, L4_BOX_SIZE, L4_BOX_SIZE)
+         .fill(0xffffff)
+         .stroke({ color: COLORS.black, width: 3, alignment: 0 });
+        container.addChild(g);
+        boxGfx.push(g);
+
+        const label = new Text({
+          text: b.label,
+          style: new TextStyle({
+            fontFamily: 'system-ui, sans-serif',
+            fontSize: 28,
+            fontWeight: 'bold',
+            fill: 0x212121,
+            align: 'center',
+          }),
+        });
+        label.anchor.set(0.5);
+        label.x = b.x;
+        label.y = b.y;
+        container.addChild(label);
+      });
+
+      // 2 balls of each color, placed in 2 rows of 3 with shuffled colors.
+      const ballColors = [
+        COLORS.red, COLORS.red,
+        COLORS.blue, COLORS.blue,
+        COLORS.green, COLORS.green,
+      ];
+      for (let i = ballColors.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ballColors[i], ballColors[j]] = [ballColors[j], ballColors[i]];
+      }
+
+      const balls = [];
+      ballColors.forEach((color, i) => {
+        const pos = L4_BALL_POSITIONS[i];
+        const ball = makeBall(pos.x, pos.y, L4_BALL_R, color);
+        ball._color = color;
+        ball._startX = pos.x;
+        ball._startY = pos.y;
+        ball.eventMode = 'static';
+        ball.cursor = 'grab';
+        ball.on('pointerdown', (e) => onL4BallDown(ball, e));
+        container.addChild(ball);
+        balls.push(ball);
+      });
+
+      state.l4 = { balls, boxes, dragging: null };
+
+      // Stage-level drag tracking. We listen on the stage (not per-ball)
+      // so that once a drag starts, we keep tracking it even if the pointer
+      // leaves the ball's bounds (PixiJS pattern for smooth drag).
+      app.stage.eventMode = 'static';
+      app.stage.hitArea = app.screen;
+      app.stage.on('pointermove', onL4StageMove);
+      app.stage.on('pointerup', onL4StageUp);
+      app.stage.on('pointerupoutside', onL4StageUp);
+    }
+
+    function onL4BallDown(ball, e) {
+      // Bring ball to top of container so it visually covers other elements
+      // (boxes, labels) while being dragged.
+      container.setChildIndex(ball, container.children.length - 1);
+      state.l4.dragging = ball;
+      ball.cursor = 'grabbing';
+      ball._dragOffsetX = ball.x - e.global.x;
+      ball._dragOffsetY = ball.y - e.global.y;
+    }
+
+    function onL4StageMove(e) {
+      const ball = state.l4.dragging;
+      if (!ball) return;
+      let x = e.global.x + ball._dragOffsetX;
+      let y = e.global.y + ball._dragOffsetY;
+      // Clamp to canvas bounds (the "stops at boundary" behavior — the
+      // ball can't be dragged off-screen, but it CAN be dragged in and
+      // out of any box freely).
+      x = Math.max(L4_BALL_R, Math.min(W - L4_BALL_R, x));
+      y = Math.max(L4_BALL_R, Math.min(H - L4_BALL_R, y));
+      ball.x = x;
+      ball.y = y;
+    }
+
+    function onL4StageUp(e) {
+      const ball = state.l4.dragging;
+      if (!ball) return;
+      state.l4.dragging = null;
+      ball.cursor = 'grab';
+      // Ball stays where dropped — no auto-return, no auto-center.
+      // Just check if all balls are now in their target boxes.
+      if (checkL4Pass()) {
+        passLevel(4);
+      }
+    }
+
+    /**
+     * Pass condition for L4:
+     *   For every ball, find the box whose `accepted` color matches the
+     *   ball's color, then check the ball center is within
+     *   (halfBox - ballR - margin) of that box's center in BOTH x and y.
+     *   If ANY ball fails, the level is not yet passed.
+     */
+    function checkL4Pass() {
+      const halfBox = L4_BOX_SIZE / 2;
+      const innerLimit = halfBox - L4_BALL_R - L4_PASS_MARGIN; // 55
+      for (const ball of state.l4.balls) {
+        const target = state.l4.boxes.find((b) => b.accepted === ball._color);
+        if (!target) return false;
+        if (Math.abs(ball.x - target.x) > innerLimit) return false;
+        if (Math.abs(ball.y - target.y) > innerLimit) return false;
+      }
+      return true;
+    }
+
+    // ===========================================================================
+    // Level transitions
+    // ===========================================================================
+
+    async function passLevel(n) {
+      logPass(n);
+      setLevel(`${n}-passed`);
+      // 800ms success overlay, then advance.
+      const flash = new Graphics();
+      flash.rect(0, 0, W, H).fill({ color: 0x4CAF50, alpha: 0.25 });
+      overlayContainer.addChild(flash);
+      const txt = new Text({
+        text: `LEVEL ${n} PASSED`,
+        style: new TextStyle({
+          fontFamily: 'system-ui, sans-serif',
+          fontSize: 64,
+          fontWeight: 'bold',
+          fill: 0xffffff,
+          stroke: { color: 0x212121, width: 4 },
+        }),
+      });
+      txt.anchor.set(0.5);
+      txt.x = W / 2;
+      txt.y = H / 2;
+      overlayContainer.addChild(txt);
+      await delay(800);
+      overlayContainer.removeChild(flash);
+      overlayContainer.removeChild(txt);
+      // Advance
+      if (n === 1) buildL2();
+      else if (n === 2) buildL3();
+      else if (n === 3) buildL4();
+      else if (n === 4) {
+        setLevel('done');
+        const final = new Text({
+          text: 'ALL LEVELS PASSED!',
+          style: new TextStyle({
+            fontFamily: 'system-ui, sans-serif',
+            fontSize: 72,
+            fontWeight: 'bold',
+            fill: 0x4CAF50,
+            stroke: { color: 0x212121, width: 4 },
+          }),
+        });
+        final.anchor.set(0.5);
+        final.x = W / 2;
+        final.y = H / 2;
+        overlayContainer.addChild(final);
+      }
+    }
+
+    // ===========================================================================
+    // Boot
+    // ===========================================================================
+
+    // Tiny intro delay so the test fixture can observe `data-level=loading`
+    // before transitioning to `playing-1`. Then start the game.
+    setLevel('loading');
+    await delay(300);
+    buildL1();
+
+    // Expose minimal handle for E2E spec introspection (no leakage of game
+    // internals; this is just for debug logs and manual smoke tests).
+    window.__game = {
+      state,
+      app,
+      passLevel,
+    };
+  </script>
+</body>
+</html>

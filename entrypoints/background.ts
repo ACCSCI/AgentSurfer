@@ -1,25 +1,73 @@
-// Service worker: opens the side panel on action click, routes messages, and
-// runs the agent loop. State is NEVER stored in module-level variables —
-// always chrome.storage or Dexie.
+// Service worker: opens the side panel on action click, routes messages,
+// and delegates to the Runtime. State is NEVER stored in module-level
+// variables — always chrome.storage or Dexie. The Runtime owns the
+// in-flight AbortController map and the agent lifecycle.
 
-import { runAgent, setWallTimeout } from '@/lib/agent';
-import { db, getActiveConfig, initToolConfigs } from '@/lib/db';
+import { setWallTimeout } from '@/lib/agent';
+import { db, initToolConfigs } from '@/lib/db';
+import { Runtime, type RuntimeEvent } from '@/lib/runtime';
 import {
   createSession,
   deleteConfig,
   deleteSession,
   setActiveConfig,
+  setConfigMaxSteps,
   setToolEnabled,
   upsertConfig,
 } from '@/lib/data-layer';
+import { messageStore } from '@/lib/message-store';
 import type { ModelConfig } from '@/types';
-import type { StepUpdate } from '@/types/messages';
 
-// ---------- Module-level state (allowed: listener registration + runtime maps) ----------
+// ---------- Module-level state (allowed: listener registration + runtime instance) ----------
 
-// Map of runId -> AbortController.
-const inflight = new Map<string, AbortController>();
-// Chunk buffer for __chunks:pull (legacy pull-based delivery).
+// The Runtime is a singleton — one per SW process. It owns the
+// inflight map. After a SW restart, the new instance starts with an
+// empty map; in-flight runs from before the restart are still
+// tracked in the checkpoint (lib/runtime/checkpoint.ts) but the new
+// Runtime can't abort them.
+//
+// Startup sweep: P0.1 fix. Runs once on SW load to abandon any
+// 'running' checkpoint records that have exceeded their wallTimeoutMs.
+// This handles the case where the SW was killed mid-run — the alarm
+// would still fire (it's persistent), but with no listener in the
+// new SW. The sweep makes sure the side panel gets a terminal
+// `agent_error` event so it doesn't stay stuck on "Agent is running…".
+void (async () => {
+  try {
+    const { sweepStaleRuns } = await import('@/lib/runtime/checkpoint');
+    const abandoned = await sweepStaleRuns();
+    for (const rec of abandoned) {
+      try {
+        chrome.runtime.sendMessage(
+          {
+            __fromSW: true,
+            type: 'agent_error',
+            runId: rec.runId,
+            sessionId: rec.sessionId,
+            message: 'abandoned (SW restarted while run was active)',
+            reason: 'abandoned',
+          },
+          () => {},
+        );
+      } catch {
+        // side panel not open — drop the broadcast
+      }
+    }
+  } catch (err) {
+    console.error('[SW] startup sweep failed:', err);
+  }
+})();
+
+const runtime = new Runtime({
+  emit: (event) => {
+    // Bridge the Runtime's emit() to chrome.runtime.sendMessage with
+    // the `__fromSW: true` tag. The side panel's onMessage listener
+    // uses this to distinguish SW broadcasts from responses to its
+    // own requests.
+    const tagged = { ...event, __fromSW: true as const };
+    try { chrome.runtime.sendMessage(tagged, () => {}); } catch {}
+  },
+});
 const chunkBuf = new Map<string, unknown[]>();
 
 // Initialize tool configs with defaults on first load.
@@ -35,7 +83,7 @@ async function ensureToolConfigs() {
 // ---------- Message routing ----------
 
 type IncomingMessage =
-  | { type: 'agent:start'; payload: { runId: string; sessionId: string; prompt: string } }
+  | { type: 'agent:start'; payload: { sessionId: string; prompt: string; agentName?: string } }
   | { type: 'agent:cancel'; runId: string }
   | { type: 'screenshot:capture' }
   | { type: 'agent:list' }
@@ -50,6 +98,8 @@ type IncomingMessage =
   | { type: '__e2e:reset' }
   | { type: '__e2e:inspect' }
   | { type: '__e2e:set-wall-timeout'; ms: number }
+  | { type: '__e2e:read-active-config' }
+  | { type: '__e2e:set-config-maxsteps'; id: string; maxSteps: number }
   | { type: '__e2e:inspect-tabs' }
   | { type: '__e2e:list-agent-steps' }
   | { type: '__e2e:list-messages' }
@@ -75,44 +125,18 @@ async function handleMessage(
     }
 
     case 'agent:start': {
-      const { runId, sessionId, prompt } = message.payload;
-      if (inflight.has(runId)) throw new Error(`Run ${runId} already in flight`);
-      const config = await getActiveConfig();
-      if (!config) throw new Error('No active model config — set one in the options page');
-
-      const ac = new AbortController();
-      inflight.set(runId, ac);
-
-      // Emit function: raw event → side panel. No buffering. No state.
-      const emit = (event: { type: string; [k: string]: unknown }) => {
-        const tagged = { ...event, __fromSW: true };
-        try { chrome.runtime.sendMessage(tagged, () => {}); } catch {}
-      };
-
-      console.log(`[SW] agent:start run=${runId}`);
-
-      // Fire-and-forget. Agent emits events; never returns a result.
-      runAgent({
-        sessionId,
-        prompt,
-        config,
-        abortSignal: ac.signal,
-        abort: () => ac.abort(),
-        emit,
-      }).catch((err) => {
-        console.error('[SW] agent:caught', err);
-        emit({ type: 'agent_error', message: err instanceof Error ? err.message : String(err) });
-        inflight.delete(runId);
-      });
-
-      return { started: true, runId };
+      const { sessionId, prompt, agentName } = message.payload;
+      console.log(`[SW] agent:start agent=${agentName ?? 'browser-agent'}`);
+      // Delegate to the Runtime. It handles runId generation, agent
+      // resolution, config lookup, abort wiring, and fire-and-forget
+      // dispatch. Returns the runId for the caller to track.
+      const result = await runtime.start({ sessionId, prompt, agentName });
+      return { started: true, runId: result.runId };
     }
 
     case 'agent:cancel': {
-      const ac = inflight.get(message.runId);
-      if (ac) {
-        ac.abort();
-        inflight.delete(message.runId);
+      const result = runtime.cancel(message.runId);
+      if (result.cancelled) {
         return { cancelled: true };
       }
       return { cancelled: false, reason: 'no-such-run' };
@@ -124,7 +148,7 @@ async function handleMessage(
       if (!buf) return { chunks: [] };
       const chunks = buf.splice(0, buf.length);
       // Clean up only when: (a) no chunks left AND (b) run is done.
-      if (chunks.length === 0 && !inflight.has(runId)) {
+      if (chunks.length === 0 && !runtime.isInflight(runId)) {
         chunkBuf.delete(runId);
       }
       return { chunks };
@@ -187,6 +211,86 @@ async function handleMessage(
       return { ok: true };
     }
 
+    case '__e2e:list-alarms': {
+      // E2E-only: enumerate every active chrome.alarms entry by name.
+      // Used by the wall-timeout specs to assert cancelWall actually
+      // removes the alarm. Requires the 'alarms' permission.
+      const all = await chrome.alarms.getAll();
+      return all.map((a) => a.name);
+    }
+
+    case '__e2e:read-checkpoint': {
+      // E2E-only: read every RunRecord from chrome.storage.session.
+      // Used by the wall-timeout sweep spec to assert sweepStaleRuns
+      // marks abandoned runs correctly.
+      const { listRuns } = await import('@/lib/runtime/checkpoint');
+      return await listRuns();
+    }
+
+    case '__e2e:simulate-sw-restart': {
+      // E2E-only: trigger a chrome.runtime.reload(). The Playwright
+      // fixture will detect the new SW via ctx.waitForEvent. Schedules
+      // the reload 100ms later so the current port postMessage can
+      // return its response before the SW dies.
+      setTimeout(() => chrome.runtime.reload(), 100);
+      return { ok: true, reloadInMs: 100 };
+    }
+
+    case '__e2e:arm-sweep': {
+      // E2E-only: force checkpoint.sweepStaleRuns() to run now (without
+      // restarting the SW). Useful for testing the sweep in isolation.
+      const { sweepStaleRuns } = await import('@/lib/runtime/checkpoint');
+      const abandoned = await sweepStaleRuns();
+      return { ok: true, abandonedCount: abandoned.length, abandoned };
+    }
+
+    case '__e2e:inject-stale-run': {
+      // E2E-only: write a fake 'running' RunRecord to the checkpoint
+      // with startMs old enough to be stale. Lets the SW-restart
+      // sweep spec run in isolation without actually killing the SW
+      // (chrome.runtime.reload() closes the entire test browser
+      // context, which makes the spec flaky).
+      const { saveRun } = await import('@/lib/runtime/checkpoint');
+      const ageMs = (message as { ageMs?: number }).ageMs ?? 200_000;
+      const wallTimeoutMs = (message as { wallTimeoutMs?: number }).wallTimeoutMs ?? 30_000;
+      const rec = {
+        runId: (message as { runId?: string }).runId ?? `e2e-stale-${Date.now()}`,
+        sessionId: `e2e-stale-session-${Date.now()}`,
+        startMs: Date.now() - ageMs,
+        modelId: 'mock:hangsForever',
+        wallTimeoutMs,
+        status: 'running' as const,
+        lastStepNumber: 0,
+      };
+      await saveRun(rec);
+      return rec;
+    }
+
+    case '__e2e:list-all': {
+      // E2E-only: dump every Dexie table + the per-table change counters.
+      // Used by specs 17/19/14 etc. to assert data-layer behavior end-to-end.
+      // Return the raw payload — the port wrapper in background.ts adds
+      // the {ok, data, error} envelope. Double-wrapping breaks dbMsg.
+      const [sessions, messages, agentSteps, screenshots, modelConfigs, toolConfigs] =
+        await Promise.all([
+          db.sessions.toArray(),
+          db.messages.toArray(),
+          db.agentSteps.toArray(),
+          db.screenshots.toArray(),
+          db.modelConfigs.toArray(),
+          db.toolConfigs.toArray(),
+        ]);
+      const changeCounters = await chrome.storage.local.get([
+        '__db_change_sessions',
+        '__db_change_messages',
+        '__db_change_agentSteps',
+        '__db_change_screenshots',
+        '__db_change_modelConfigs',
+        '__db_change_toolConfigs',
+      ]);
+      return { sessions, messages, agentSteps, screenshots, modelConfigs, toolConfigs, changeCounters };
+    }
+
     case '__e2e:inspect': {
       console.log('[SW] __e2e:inspect handler running');
       const configs = await db.modelConfigs.toArray();
@@ -204,6 +308,24 @@ async function handleMessage(
       // E2E-only: override the wall-clock timeout for long-running tests.
       setWallTimeout(message.ms);
       return { ok: true, ms: message.ms };
+    }
+
+    case '__e2e:read-active-config': {
+      // E2E-only: return the active ModelConfig in full (including
+      // maxSteps) so a test can assert what the agent loop will read.
+      // Distinct from __e2e:inspect (which also returns sessions etc.)
+      // — this is a focused, deterministic read for maxSteps assertions.
+      const configs = await db.modelConfigs.toArray();
+      const active = configs.find((c) => c.isDefault) ?? configs[0] ?? null;
+      return { activeConfig: active };
+    }
+
+    case '__e2e:set-config-maxsteps': {
+      // E2E-only: mutate a single config's maxSteps. Used by live-LLM
+      // specs to dial the cap without driving the Options form.
+      const { id, maxSteps } = message as { id: string; maxSteps: number };
+      await setConfigMaxSteps(id, maxSteps);
+      return { ok: true, id, maxSteps };
     }
 
     case '__e2e:list-agent-steps': {
@@ -577,6 +699,7 @@ async function handleMessage(
         { x: 100, y: 100 },
         { x: 200, y: 200 },
         { x: 400, y: 400 },
+        { x: 640, y: 400 },
         { x: 800, y: 400 },
       ];
       const size = 100;
@@ -687,15 +810,49 @@ export default defineBackground(() => {
 
   // Also listen on connect ports for long-lived e2e communication.
   chrome.runtime.onConnect.addListener((port) => {
-    if (port.name !== 'e2e-diag') return;
-    port.onMessage.addListener(async (msg) => {
-      try {
-        const result = await handleMessage(msg, null);
-        const plain = JSON.parse(JSON.stringify(result));
-        port.postMessage({ ok: true, data: plain });
-      } catch (err) {
-        port.postMessage({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    });
+    if (port.name === 'e2e-diag') {
+      port.onMessage.addListener(async (msg) => {
+        try {
+          const result = await handleMessage(msg, null);
+          const plain = JSON.parse(JSON.stringify(result));
+          port.postMessage({ ok: true, data: plain });
+        } catch (err) {
+          port.postMessage({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+      return;
+    }
+    if (port.name === 'msgstore') {
+      // The side panel's long-lived connection to MessageStore. On connect,
+      // subscribe the port as a state subscriber — it gets a snapshot
+      // immediately. Subsequent state changes (chunks, markComplete, etc.)
+      // are pushed as `__msgstore:update` messages. The port also carries
+      // commands from the side panel: select_session, send, cancel.
+      messageStore.subscribe(port as unknown as { postMessage: (msg: unknown) => void });
+      port.onDisconnect.addListener(() => {
+        messageStore.unsubscribe(port as unknown as { postMessage: (msg: unknown) => void });
+      });
+      port.onMessage.addListener(async (msg) => {
+        const m = msg as { type?: string; sessionId?: string; prompt?: string; runId?: string };
+        try {
+          if (m.type === 'select_session' && typeof m.sessionId === 'string') {
+            await messageStore.startSession(m.sessionId);
+          } else if (m.type === 'send' && typeof m.prompt === 'string' && typeof m.sessionId === 'string') {
+            // Delegate to the Runtime directly. The Runtime generates
+            // the runId and dispatches the agent loop fire-and-forget.
+            const result = await runtime.start({
+              sessionId: m.sessionId,
+              prompt: m.prompt,
+            });
+            port.postMessage({ ok: true, data: { started: true, runId: result.runId } });
+          } else if (m.type === 'cancel' && typeof m.runId === 'string') {
+            const result = runtime.cancel(m.runId);
+            port.postMessage({ ok: true, data: result });
+          }
+        } catch (err) {
+          port.postMessage({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+    }
   });
 });

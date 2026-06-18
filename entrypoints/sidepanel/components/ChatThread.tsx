@@ -1,51 +1,26 @@
-import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef } from 'react';
 
-import { db, getMessagesBySession, getStepsForMessage } from '@/lib/db';
-import { useChangeCount } from '@/lib/use-change-count';
+import { useMessageStore } from '@/stores/useMessageStore';
 import { useAgentStore } from '@/stores';
 import { MessageBubble } from './MessageBubble';
 
-export function ChatThread({ sessionId }: { sessionId: string }) {
-  // Re-query when SW writes to messages or agentSteps tables.
-  const messageChangeCount = useChangeCount('messages');
-  const stepChangeCount = useChangeCount('agentSteps');
-
-  // Query 1: messages for this session — re-runs when any message row changes.
-  const messages = useLiveQuery(
-    () => getMessagesBySession(sessionId),
-    [sessionId, messageChangeCount],
-    [],
-  );
-
-  // Query 2: steps for each message — keyed on session ID so it re-runs
-  // when steps are added to Dexie (not just when messages change).
-  const allStepsForSession = useLiveQuery(
-    async () => {
-      if (!messages || messages.length === 0) return new Map();
-      const map = new Map<string, Awaited<ReturnType<typeof getStepsForMessage>>>();
-      for (const m of messages) {
-        map.set(m.id, await getStepsForMessage(m.id));
-      }
-      return map;
-    },
-    [sessionId, messageChangeCount, stepChangeCount],
-    new Map(),
-  );
-
-  const currentStep = useAgentStore((s) => s.currentStep);
-  const accumulatedText = useAgentStore((s) => s.accumulatedText);
-  const accumulatedReasoning = useAgentStore((s) => s.accumulatedReasoning);
-  const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
+export function ChatThread() {
+  // MessageStore is the single source of truth for message bodies during
+  // streaming. Dexie is not queried here — only MessageStore is.
+  const { state } = useMessageStore();
+  const messages = state.messages;
   const error = useAgentStore((s) => s.error);
-  const isRunning = useAgentStore((s) => s.isRunning);
+
+  // The last assistant message is "live" when its status is 'draft'.
+  const lastMsg = messages[messages.length - 1];
+  const isLive = lastMsg?.status === 'draft';
 
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages?.length, currentStep?.stepNumber, error]);
+  }, [messages.length, lastMsg?.text?.length, lastMsg?.reasoning?.length, lastMsg?.toolCalls.length, error]);
 
-  if ((!messages || messages.length === 0) && !isRunning && !error) {
+  if (messages.length === 0 && !error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted-foreground">
         <p>Ask the agent to do something on the active tab.</p>
@@ -57,62 +32,22 @@ export function ChatThread({ sessionId }: { sessionId: string }) {
   }
 
   return (
-    <div className="mx-auto flex max-w-2xl flex-col gap-3 p-4">
-      {(messages ?? []).map((m) => (
-        <MessageBubble
-          key={m.id}
-          message={m}
-          steps={allStepsForSession.get(m.id) ?? []}
-          isLive={isRunning && currentStep?.stepNumber != null && m.role === 'assistant'}
-          liveText={m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? accumulatedText : ''}
-          liveReasoning={m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? accumulatedReasoning : ''}
-          liveToolCalls={
-            m.role === 'assistant' && m === (messages ?? [])[(messages ?? []).length - 1] ? liveToolCalls : []
-          }
-        />
+    <div
+      className="mx-auto flex max-w-2xl flex-col gap-3 p-4"
+      data-testid="chat-thread"
+      data-message-count={messages.length}
+      data-is-live={isLive}
+    >
+      {messages.map((m) => (
+        <MessageBubble key={m.messageId} message={m} />
       ))}
-      {/* Streaming bubble: shown when the agent is running but the persisted
-          assistant message has not been written yet (it only appears after
-          onFinish → appendMessage). This is the ONLY place the user sees
-          the streaming text grow in real time on the first response. */}
-      {isRunning && (messages ?? []).length > 0 && (messages ?? [])[(messages ?? []).length - 1]?.role === 'user' && (accumulatedText || accumulatedReasoning || liveToolCalls.length > 0) && (
-        <MessageBubble
-          message={{
-            id: '__live_streaming__',
-            sessionId: 'live',
-            role: 'assistant',
-            parts: [],
-            createdAt: 0,
-            screenshotIds: [],
-          } as unknown as import('@/types').ChatMessage}
-          steps={[]}
-          isLive={true}
-          liveText={accumulatedText}
-          liveReasoning={accumulatedReasoning}
-          liveToolCalls={liveToolCalls}
-        />
-      )}
-      {isRunning && (messages ?? []).length > 0 && (messages ?? [])[(messages ?? []).length - 1]?.role === 'user' && !(accumulatedText || accumulatedReasoning || liveToolCalls.length > 0) && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      {isLive && (
+        <div
+          data-testid="agent-running-indicator"
+          className="flex items-center gap-2 text-xs text-muted-foreground"
+        >
           <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
           Agent is running…
-        </div>
-      )}
-      {isRunning && liveToolCalls.length > 0 && (
-        <div className="space-y-1">
-          {liveToolCalls.map((tc) => (
-            <div
-              key={tc.id}
-              className="rounded border border-dashed border-primary/50 bg-primary/5 p-2 font-mono text-[11px]"
-            >
-              <span className="text-primary">→</span> {tc.name}
-              {Object.keys(tc.args).length > 0 && (
-                <span className="ml-1 text-muted-foreground">
-                  ({Object.keys(tc.args).slice(0, 2).map((k) => `${k}=${typeof tc.args[k] === 'string' ? (tc.args[k] as string).slice(0, 30) : '…'}`).join(', ')})
-                </span>
-              )}
-            </div>
-          ))}
         </div>
       )}
       {error && (

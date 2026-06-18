@@ -5,14 +5,22 @@ import { ChevronLeft, ChevronRight, MessageSquare, Plus, Trash2 } from 'lucide-r
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
-import { db, deleteSession } from '@/lib/db';
+import { db } from '@/lib/db';
+import { useChangeCount } from '@/lib/use-change-count';
 import { useSessionStore } from '@/stores';
+
+async function dbMsg(message: { type: string; [k: string]: unknown }): Promise<void> {
+  const res = (await chrome.runtime.sendMessage(message)) as { ok: boolean; error?: string };
+  if (!res.ok) throw new Error(res.error ?? 'db message failed');
+}
 
 export function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
+  // Re-query when SW writes to sessions table.
+  const sessionChangeCount = useChangeCount('sessions');
   const sessions = useLiveQuery(
     () => db.sessions.orderBy('updatedAt').reverse().toArray(),
-    [],
+    [sessionChangeCount],
     [],
   );
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
@@ -87,13 +95,13 @@ export function Sidebar() {
                 className="hidden shrink-0 rounded p-0.5 text-muted-foreground hover:bg-destructive/15 hover:text-destructive group-hover:inline-flex"
                 onClick={(e) => {
                   e.stopPropagation();
-                  deleteSession(s.id);
+                  dbMsg({ type: 'db:delete-session', sessionId: s.id });
                   if (currentSessionId === s.id) setCurrent(null);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    deleteSession(s.id);
+                    dbMsg({ type: 'db:delete-session', sessionId: s.id });
                     if (currentSessionId === s.id) setCurrent(null);
                   }
                 }}

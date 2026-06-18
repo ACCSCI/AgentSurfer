@@ -2,12 +2,14 @@ import { useLiveQuery } from 'dexie-react-hooks';
 
 import { Badge } from '@/components/ui/badge';
 import { db } from '@/lib/db';
+import { useChangeCount } from '@/lib/use-change-count';
 import { ProviderMeta } from '@/types';
 import { useSettingsStore } from '@/stores';
 
 export function ModelBadge() {
   const activeConfigId = useSettingsStore((s) => s.activeConfigId);
-  const configs = useLiveQuery(() => db.modelConfigs.toArray(), [], []);
+  const configChangeCount = useChangeCount('modelConfigs');
+  const configs = useLiveQuery(() => db.modelConfigs.toArray(), [configChangeCount], []);
   const active = configs.find((c) => c.id === activeConfigId);
 
   if (!active) {

@@ -42,7 +42,8 @@ export type SmartScreenshotResult =
   | { kind: 'single'; dataUrl: string; width: number; height: number; timestamp: number }
   | { kind: 'region'; dataUrl: string; region: Region; timestamp: number }
   | { kind: 'schedule'; frames: FrameMeta[]; totalFrames: number; totalDurationMs: number }
-  | { kind: 'refs'; frames: FrameImage[] };
+  | { kind: 'refs'; frames: FrameImage[] }
+  | { error: string };
 
 /**
  * Called from the SW. Tries the side panel first (full smart features),

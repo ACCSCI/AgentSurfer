@@ -8,10 +8,11 @@ export default defineConfig({
 
   manifest: () => ({
     name: 'AgentSurfer',
+    version: '2.0.0',
     short_name: 'AgentSurfer',
     description:
       'AI-powered browser agent: control any page with natural language across 6 LLM providers.',
-    permissions: ['tabs', 'scripting', 'storage', 'sidePanel'],
+    permissions: ['tabs', 'scripting', 'storage', 'sidePanel', 'debugger', 'alarms'],
     host_permissions: ['<all_urls>'],
     action: {},
     side_panel: {

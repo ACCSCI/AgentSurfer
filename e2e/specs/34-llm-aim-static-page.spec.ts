@@ -142,6 +142,38 @@ test('LLM aims at known green target on the static probe page', async () => {
     // Assert: real iteration happened.
     expect(cdpAimSteps.length, 'LLM should iterate (≥2 cdpAim calls)').toBeGreaterThanOrEqual(2);
 
+    // Assert: every AFTER screenshot is DIFFERENT from the matching BEFORE
+    // screenshot — i.e., the crosshair was actually drawn and composited
+    // before capture. (catches the compositor race where AFTER == BEFORE.)
+    type AimPair = { idx: number; before: string; after: string; reqX: number; reqY: number; size: number };
+    const pairs: AimPair[] = [];
+    for (const s of steps.steps as Array<{
+      toolCalls: Array<{ name: string; args: Record<string, unknown> }>;
+      toolResults: Array<{ name: string; isError: boolean; result: unknown }>;
+    }>) {
+      for (let i = 0; i < s.toolCalls.length; i++) {
+        const tc = s.toolCalls[i];
+        const tr = s.toolResults[i];
+        if (tc.name !== 'cdpAim' || !tr || tr.isError) continue;
+        const r = tr.result as { dataUrl?: string; beforeDataUrl?: string };
+        if (!r?.dataUrl || !r?.beforeDataUrl) continue;
+        pairs.push({
+          idx: pairs.length,
+          before: r.beforeDataUrl,
+          after: r.dataUrl,
+          reqX: Number(tc.args.x),
+          reqY: Number(tc.args.y),
+          size: Number(tc.args.size),
+        });
+      }
+    }
+    let crosshairVisible = 0;
+    for (const p of pairs) {
+      if (p.before !== p.after) crosshairVisible++;
+    }
+    console.log(`Crosshair visible in AFTER: ${crosshairVisible}/${pairs.length} shots`);
+    expect(crosshairVisible, `compositor race: every cdpAim AFTER should differ from BEFORE`).toBe(pairs.length);
+
     // Sanity-check the FIRST aim landed near the target. The LLM may
     // drift on later iterations if its servoing is poor, but the first
     // aim is the moment of truth for "did the LLM actually see the
@@ -150,8 +182,8 @@ test('LLM aims at known green target on the static probe page', async () => {
     const firstDx = Number(first.args.x) - TARGET_CENTER.x;
     const firstDy = Number(first.args.y) - TARGET_CENTER.y;
     const firstDist = Math.sqrt(firstDx * firstDx + firstDy * firstDy);
-    console.log(`\nFirst aim distance from target: ${firstDist.toFixed(1)} CSS px`);
-    expect(firstDist, 'first aim should be within 100 CSS px of the green target center (LLM should actually see the target)').toBeLessThan(100);
+    console.log(`\nFirst aim distance from target: ${firstDist.toFixed(1)} screenshot px`);
+    expect(firstDist, 'first aim should be within 100 screenshot px of the green target center').toBeLessThan(100);
   } catch (err) {
     traceFail('test', err, { snapshot: traceSnapshot() });
     throw err;

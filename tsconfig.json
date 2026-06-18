@@ -13,7 +13,6 @@
     "./lib/**/*",
     "./stores/**/*",
     "./types/**/*",
-    "./scripts/**/*",
     "./.wxt/wxt.d.ts",
     "./.wxt/types/**/*",
     "./wxt.config.ts"

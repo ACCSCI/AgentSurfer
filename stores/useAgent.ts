@@ -1,125 +1,95 @@
-// Agent run store — tracks the current in-flight agent run so the side panel
-// can stream step updates from the service worker. Persistence of steps
-// happens in the service worker via Dexie; this store is a UI-side mirror.
+// Agent run store — non-message concerns.
+//
+// Message bodies (text / reasoning / tool calls) live in MessageStore and
+// flow to the side panel via the `msgstore` port. This store only carries
+// the auxiliary event-driven state that the architecture rules require to
+// be distinct event types (per Rule 7): steps, todos, progress, token
+// usage, tool results, and errors.
 
 import { create } from 'zustand';
-import type { AgentStep, ToolCall } from '@/types/agent';
 import type { StepUpdate } from '@/types/messages';
 
-interface AgentState {
-  runId: string | null;
-  isRunning: boolean;
-  currentStep: StepUpdate | null;
-  // Accumulated streaming text across the ENTIRE run (not per-step).
-  // Only cleared on start/reset/finish. This prevents the "flash and disappear"
-  // when a step completes and the live section resets.
-  accumulatedText: string;
-  accumulatedReasoning: string;
-  // Tool calls from the current in-progress step (before onStepFinish).
-  // Cleared on setStep (step completed → tool calls are now in Dexie).
-  liveToolCalls: ToolCall[];
-  runningTools: Record<string, 'pending' | 'ok' | 'error'>;
-  abortController: AbortController | null;
-  error: string | null;
-
-  start: (runId: string) => AbortController;
-  cancel: () => void;
-  setStep: (step: StepUpdate) => void;
-  appendText: (text: string) => void;
-  appendReasoning: (text: string) => void;
-  addStreamingToolCall: (tc: ToolCall) => void;
-  markTool: (toolCallId: string, status: 'pending' | 'ok' | 'error') => void;
-  finish: (totalUsage?: { prompt: number; completion: number }) => void;
-  fail: (message: string) => void;
-  reset: () => void;
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm: string;
 }
 
-export const useAgentStore = create<AgentState>((set, get) => ({
-  runId: null,
-  isRunning: false,
+export interface TokenUsage {
+  stepNumber: number;
+  prompt: number;
+  completion: number;
+}
+
+export interface ProgressUpdate {
+  current: number;
+  total: number;
+  percentage: number;
+}
+
+export interface ToolResultEvent {
+  toolCallId: string;
+  name: string;
+  result: unknown;
+  isError: boolean;
+  stepNumber: number;
+}
+
+interface AgentState {
+  currentStep: StepUpdate | null;
+  error: string | null;
+
+  // Per-event-type state (architecture rule 7).
+  todos: TodoItem[];
+  currentProgress: ProgressUpdate | null;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  perStepTokens: TokenUsage[];
+  toolResults: ToolResultEvent[];
+
+  setStep: (step: StepUpdate) => void;
+  /** tool_result event — record the result. */
+  recordToolResult: (e: ToolResultEvent) => void;
+  /** token_usage event — append to per-step list and update totals. */
+  recordTokenUsage: (e: TokenUsage) => void;
+  /** progress event — update the current step indicator. */
+  setProgress: (p: ProgressUpdate) => void;
+  /** todo_update event — replace the todo list. */
+  setTodos: (todos: TodoItem[]) => void;
+  /** agent_error event — record a fatal error for display. */
+  fail: (message: string) => void;
+}
+
+const initial = {
   currentStep: null,
-  accumulatedText: '',
-  accumulatedReasoning: '',
-  liveToolCalls: [],
-  runningTools: {},
-  abortController: null,
   error: null,
+  todos: [],
+  currentProgress: null,
+  totalPromptTokens: 0,
+  totalCompletionTokens: 0,
+  perStepTokens: [],
+  toolResults: [],
+};
 
-  start: (runId) => {
-    const ac = new AbortController();
-    set({
-      runId,
-      isRunning: true,
-      currentStep: null,
-      accumulatedText: '',
-      accumulatedReasoning: '',
-      liveToolCalls: [],
-      runningTools: {},
-      abortController: ac,
-      error: null,
-    });
-    return ac;
-  },
-
-  cancel: () => {
-    const ac = get().abortController;
-    if (ac) ac.abort();
-  },
+export const useAgentStore = create<AgentState>((set) => ({
+  ...initial,
 
   setStep: (step) =>
-    set({
-      currentStep: step,
-      // Keep liveToolCalls — they're still visible until the NEXT step's
-      // first chunk arrives (appendText or addStreamingToolCall clears them).
-      // This prevents the flash where tool calls vanish between steps.
-    }),
+    set({ currentStep: step }),
 
-  appendText: (text) =>
+  recordToolResult: (e) =>
+    set((s) => ({ toolResults: [...s.toolResults, e] })),
+
+  recordTokenUsage: (e) =>
     set((s) => ({
-      accumulatedText: s.accumulatedText + text,
-      liveToolCalls: [],
+      perStepTokens: [...s.perStepTokens, e],
+      totalPromptTokens: s.totalPromptTokens + e.prompt,
+      totalCompletionTokens: s.totalCompletionTokens + e.completion,
     })),
 
-  appendReasoning: (text) =>
-    set((s) => ({ accumulatedReasoning: s.accumulatedReasoning + text })),
+  setProgress: (p) => set({ currentProgress: p }),
 
-  addStreamingToolCall: (tc) =>
-    set((s) => ({ liveToolCalls: [...s.liveToolCalls, tc] })),
+  setTodos: (todos) => set({ todos }),
 
-  markTool: (toolCallId, status) =>
-    set((s) => ({ runningTools: { ...s.runningTools, [toolCallId]: status } })),
-
-  finish: (_totalUsage) =>
-    set({
-      isRunning: false,
-      abortController: null,
-      currentStep: null,
-      liveToolCalls: [],
-    }),
-
-  fail: (message) =>
-    set({
-      isRunning: false,
-      abortController: null,
-      error: message,
-      liveToolCalls: [],
-      // Keep accumulatedText — the user should see what the model
-      // said before the error. Cleared only on reset().
-    }),
-
-  reset: () =>
-    set({
-      runId: null,
-      isRunning: false,
-      currentStep: null,
-      accumulatedText: '',
-      accumulatedReasoning: '',
-      liveToolCalls: [],
-      runningTools: {},
-      abortController: null,
-      error: null,
-    }),
+  fail: (message) => set({ error: message }),
 }));
-
-// Type alias export for components.
-export type { AgentStep };

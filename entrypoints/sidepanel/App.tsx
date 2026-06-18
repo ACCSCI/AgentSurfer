@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Loader2, RefreshCw, Settings as SettingsIcon, Square, Wand2 } from 'lucide-react';
 
@@ -6,9 +6,9 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { useAgentStore, useSessionStore, useSettingsStore, useModelConfigsSync, type TokenUsage, type ProgressUpdate, type ToolResultEvent, type TodoItem } from '@/stores';
+import { useMessageStore } from '@/stores/useMessageStore';
 import { db } from '@/lib/db';
 import { useChangeCount } from '@/lib/use-change-count';
-import { sendToSW } from '@/lib/sw-messenger';
 import type { StepUpdate } from '@/types/messages';
 import { ChatThread } from './components/ChatThread';
 import { InputBar } from './components/InputBar';
@@ -28,34 +28,33 @@ export default function App() {
   useModelConfigsSync();
 
   const currentSessionId = useSessionStore((s) => s.currentSessionId);
-  const startNewSession = useSessionStore((s) => s.startNewSession);
   const setCurrent = useSessionStore((s) => s.setCurrentSession);
+  const startNewSession = useSessionStore((s) => s.startNewSession);
   const hydrate = useSettingsStore((s) => s.hydrate);
   const settingsReady = useSettingsStore((s) => s.ready);
   const setStep = useAgentStore((s) => s.setStep);
-  const setRunId = useAgentStore((s) => s.start);
-  const appendText = useAgentStore((s) => s.appendText);
-  const appendReasoning = useAgentStore((s) => s.appendReasoning);
-  const addStreamingToolCall = useAgentStore((s) => s.addStreamingToolCall);
   const recordToolResult = useAgentStore((s) => s.recordToolResult);
   const recordTokenUsage = useAgentStore((s) => s.recordTokenUsage);
   const setProgress = useAgentStore((s) => s.setProgress);
   const setTodos = useAgentStore((s) => s.setTodos);
-  const accumulatedText = useAgentStore((s) => s.accumulatedText);
-  const accumulatedReasoning = useAgentStore((s) => s.accumulatedReasoning);
-  const liveToolCalls = useAgentStore((s) => s.liveToolCalls);
-  const cancelRun = useAgentStore((s) => s.cancel);
-  const finishRun = useAgentStore((s) => s.finish);
   const failRun = useAgentStore((s) => s.fail);
-  const resetAgent = useAgentStore((s) => s.reset);
-  const isRunning = useAgentStore((s) => s.isRunning);
-  const currentRunId = useAgentStore((s) => s.runId);
+
+  // MessageStore is the single source of truth for messages + send/cancel
+  // commands. The side panel connects to the SW's `msgstore` port via this
+  // hook and gets a snapshot on connect + updates on every state change.
+  const { state: msgState, selectSession, send, cancel: cancelRunViaPort } = useMessageStore();
+  const messages = msgState.messages;
+
+  // isRunning is derived from the last message's status. While a draft
+  // message exists, the agent is mid-stream. When markComplete runs, the
+  // status flips to 'complete' and isLive becomes false.
+  const isLive = messages.length > 0 && messages[messages.length - 1]?.status === 'draft';
+  const currentRunIdRef = useRef<string | null>(null);
 
   const sessionChangeCount = useChangeCount('sessions');
   const mostRecentSession = useLiveQuery(
     async () => (await db.sessions.orderBy('updatedAt').reverse().first()) ?? null,
     [sessionChangeCount],
-    // undefined initial value: distinguishes "loading" from "no sessions".
     undefined as { id: string; title: string; createdAt: number; updatedAt: number } | null | undefined,
   );
 
@@ -64,109 +63,53 @@ export default function App() {
     if (!settingsReady) hydrate();
   }, [settingsReady, hydrate]);
 
-  // Track the previous session id so we only reset agent state when the
-  // session actually changes — not on every Dexie write that touches the
-  // session row (e.g. updatedAt bump from appendMessage). Without this,
-  // the effect re-runs and resetAgent() wipes isRunning mid-run, hiding
-  // the streaming text and the Cancel button.
-  const prevSessionIdRef = useRef<string | null>(null);
-
+  // On first open, ensure we have a session selected.
   useEffect(() => {
-    if (currentSessionId && currentSessionId !== prevSessionIdRef.current) {
-      prevSessionIdRef.current = currentSessionId;
-      // Session changed → reset agent state (clear errors, live text, etc.)
-      resetAgent();
-      return;
-    }
-    if (currentSessionId) {
-      // Same session — don't reset. updatedAt bumps from appendMessage
-      // re-render useLiveQuery and would otherwise kill an in-flight run.
-      prevSessionIdRef.current = currentSessionId;
-      return;
-    }
-    // `mostRecentSession === null` is ambiguous: it could mean "Dexie has no
-    // sessions" OR "Dexie query is still loading" (initial render). Only
-    // create a new session if the query has completed (undefined) and
-    // returned null. The 3rd arg of useLiveQuery is the initial value —
-    // we set it to undefined so the first render is distinguishable.
     if (mostRecentSession === undefined) return; // still loading
     if (mostRecentSession) setCurrent(mostRecentSession.id);
     else startNewSession();
-  }, [currentSessionId, mostRecentSession, setCurrent, startNewSession, resetAgent]);
+  }, [mostRecentSession, setCurrent, startNewSession]);
 
-  // Listen for messages from the service worker.
-  const setStepRef = useRef(setStep);
-  setStepRef.current = setStep;
-  const finishRef = useRef(finishRun);
-  finishRef.current = finishRun;
-  const failRef = useRef(failRun);
-  failRef.current = failRun;
-  const appendTextRef = useRef(appendText);
-  appendTextRef.current = appendText;
-  const appendReasoningRef = useRef(appendReasoning);
-  appendReasoningRef.current = appendReasoning;
-  const addTcRef = useRef(addStreamingToolCall);
-  addTcRef.current = addStreamingToolCall;
-  const recordToolResultRef = useRef(recordToolResult);
-  recordToolResultRef.current = recordToolResult;
-  const recordTokenUsageRef = useRef(recordTokenUsage);
-  recordTokenUsageRef.current = recordTokenUsage;
-  const setProgressRef = useRef(setProgress);
-  setProgressRef.current = setProgress;
-  const setTodosRef = useRef(setTodos);
-  setTodosRef.current = setTodos;
+  // When the current session changes, tell the SW to hydrate MessageStore
+  // from Dexie. MessageStore pushes a snapshot back via the port, which
+  // updates `messages` and triggers a re-render of ChatThread.
+  const prevSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (currentSessionId === prevSessionIdRef.current) return;
+    prevSessionIdRef.current = currentSessionId;
+    if (currentSessionId) {
+      selectSession(currentSessionId);
+      currentRunIdRef.current = null;
+    }
+  }, [currentSessionId, selectSession]);
 
-  // Event listener — pure event consumption. UI owns all state.
+  // Listen for non-message events from the SW (step_done, todo_update,
+  // progress, token_usage, agent_done, agent_error). Message bodies flow
+  // through MessageStore — we don't touch 'chunk' or 'user_message' here.
   useEffect(() => {
     const handler = (message: { type?: string; __fromSW?: boolean; [k: string]: unknown }) => {
       if (!message.__fromSW) return;
       const t = message.type;
-      if (t === 'user_message') return; // UI already shows the user bubble.
-      if (t === 'model_ready') return; // UI doesn't need this.
       if (t === 'step_done') {
-        setStepRef.current((message as { update: StepUpdate }).update);
+        setStep((message as { update: StepUpdate }).update);
       } else if (t === 'agent_done') {
-        finishRef.current();
+        currentRunIdRef.current = null;
       } else if (t === 'agent_error') {
-        failRef.current(String((message as { message?: string }).message ?? 'Agent error'));
+        failRun(String((message as { message?: string }).message ?? 'Agent error'));
+        currentRunIdRef.current = null;
       } else if (t === 'tool_result') {
-        recordToolResultRef.current(message as unknown as ToolResultEvent);
+        recordToolResult(message as unknown as ToolResultEvent);
       } else if (t === 'token_usage') {
-        recordTokenUsageRef.current(message as unknown as TokenUsage);
+        recordTokenUsage(message as unknown as TokenUsage);
       } else if (t === 'progress') {
-        setProgressRef.current(message as unknown as ProgressUpdate);
+        setProgress(message as unknown as ProgressUpdate);
       } else if (t === 'todo_update') {
-        setTodosRef.current(((message as { todos: TodoItem[] }).todos) ?? []);
-      } else if (t === 'chunk') {
-        const c = (message as { data?: { type: string; [k: string]: unknown } }).data;
-        if (!c) return;
-        if (c.type === 'text-delta' && typeof c.textDelta === 'string') {
-          appendTextRef.current(c.textDelta);
-        } else if (c.type === 'reasoning' || c.type === 'reasoning-delta') {
-          const text =
-            ((c as { textDelta?: string }).textDelta ?? '') ||
-            ((c as { text?: string }).text ?? '');
-          if (text) appendReasoningRef.current(text);
-        } else if (c.type === 'tool-call' && c.toolCallId && c.toolName) {
-          addTcRef.current({
-            id: c.toolCallId as string,
-            name: c.toolName as string,
-            args: (typeof c.args === 'string' ? safeJson(c.args) : (c.args as Record<string, unknown>)) ?? {},
-          });
-        }
+        setTodos(((message as { todos: TodoItem[] }).todos) ?? []);
       }
     };
     chrome.runtime.onMessage.addListener(handler);
     return () => chrome.runtime.onMessage.removeListener(handler);
-  }, []);
-
-  function safeJson(s: string): Record<string, unknown> {
-    try {
-      return JSON.parse(s);
-    } catch {
-      return {};
-    }
-  }
+  }, [setStep, recordToolResult, recordTokenUsage, setProgress, setTodos, failRun]);
 
   function openSettings() {
     chrome.runtime.openOptionsPage();
@@ -174,29 +117,20 @@ export default function App() {
 
   async function startAgent(prompt: string) {
     if (!currentSessionId) return;
-    const runId = crypto.randomUUID();
-    setRunId(runId);
     try {
-      await sendToSW({
-        type: 'agent:start',
-        payload: { runId, sessionId: currentSessionId, prompt },
-      });
+      const result = await send(currentSessionId, prompt);
+      currentRunIdRef.current = result.runId;
     } catch (err) {
       failRun(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function cancel() {
-    const runId = useAgentStore.getState().runId;
-    cancelRun();
+    const runId = currentRunIdRef.current;
     if (runId) {
-      try {
-        await sendToSW({ type: 'agent:cancel', runId });
-      } catch {
-        // ignore
-      }
+      try { await cancelRunViaPort(runId); } catch { /* ignore */ }
     }
-    resetAgent();
+    currentRunIdRef.current = null;
   }
 
   return (
@@ -211,7 +145,7 @@ export default function App() {
             <ModelBadge />
           </div>
           <div className="flex items-center gap-1">
-            {isRunning && (
+            {isLive && (
               <Button size="sm" variant="destructive" onClick={cancel}>
                 <Square className="mr-1 h-3 w-3 fill-current" /> Cancel
               </Button>
@@ -232,7 +166,7 @@ export default function App() {
 
         <ScrollArea className="min-h-0 flex-1">
           {currentSessionId ? (
-            <ChatThread sessionId={currentSessionId} />
+            <ChatThread />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
@@ -240,7 +174,7 @@ export default function App() {
           )}
         </ScrollArea>
 
-        <InputBar onSubmit={startAgent} disabled={!currentSessionId} />
+        <InputBar onSubmit={startAgent} onCancel={cancel} disabled={!currentSessionId} />
       </main>
     </div>
   );

@@ -44,6 +44,12 @@ export class AgentSurferDB extends Dexie {
     this.version(2).stores({
       toolConfigs: 'name',
     });
+
+    // v3 — add status index on messages (MessageStore writes incrementally
+    // and the side panel needs to filter 'draft' from 'complete').
+    this.version(3).stores({
+      messages: 'id, sessionId, role, createdAt, status, [sessionId+createdAt]',
+    });
   }
 }
 

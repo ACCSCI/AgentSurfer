@@ -3,17 +3,22 @@ import { Send, Square } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { useAgentStore } from '@/stores';
+import { useMessageStore } from '@/stores/useMessageStore';
 
 export function InputBar({
   onSubmit,
+  onCancel,
   disabled,
 }: {
   onSubmit: (prompt: string) => void;
+  onCancel: () => void;
   disabled?: boolean;
 }) {
-  const isRunning = useAgentStore((s) => s.isRunning);
-  const cancel = useAgentStore((s) => s.cancel);
+  // isRunning is derived from MessageStore — last message is in 'draft' state.
+  const { state } = useMessageStore();
+  const lastMsg = state.messages[state.messages.length - 1];
+  const isRunning = lastMsg?.status === 'draft';
+
   const [value, setValue] = useState('');
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -53,7 +58,7 @@ export function InputBar({
           <Button
             size="icon"
             variant="destructive"
-            onClick={cancel}
+            onClick={onCancel}
             title="Cancel run"
             className="shrink-0"
           >

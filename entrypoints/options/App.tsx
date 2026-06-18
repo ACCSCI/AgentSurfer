@@ -10,7 +10,9 @@ import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
-import { db, deleteConfig, newId, now, setActiveConfig, upsertConfig } from '@/lib/db';
+import { db, newId, now } from '@/lib/db';
+import { useChangeCount } from '@/lib/use-change-count';
+import { sendToSW } from '@/lib/sw-messenger';
 import { KnownModels } from '@/lib/llm';
 import { ToolConfigPanel } from './components/ToolConfigPanel';
 import {
@@ -22,8 +24,18 @@ import {
 } from '@/types';
 import { ModelConfigSchema } from '@/types';
 
+async function dbMsg(message: { type: string; [k: string]: unknown }): Promise<void> {
+  const res = await sendToSW(message);
+  if (!res.ok) throw new Error(res.error ?? 'db message failed');
+}
+
 export default function OptionsApp() {
-  const configs = useLiveQuery(() => db.modelConfigs.orderBy('createdAt').toArray(), [], []);
+  const configChangeCount = useChangeCount('modelConfigs');
+  const configs = useLiveQuery(
+    () => db.modelConfigs.orderBy('createdAt').toArray(),
+    [configChangeCount],
+    [],
+  );
 
   return (
     <div className="mx-auto max-w-3xl p-6">
@@ -75,6 +87,7 @@ function ConfigForm() {
   const [modelId, setModelId] = useState(DefaultModelId.openai);
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
+  const [maxSteps, setMaxSteps] = useState<number>(99);
   const [makeDefault, setMakeDefault] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState(false);
@@ -96,6 +109,10 @@ function ConfigForm() {
       apiKey: apiKey.trim(),
       baseUrl: baseUrl.trim() || null,
       isDefault: makeDefault,
+      // Coerce to number explicitly — <input type="number"> returns
+      // "" when cleared, which Zod rejects; clamp to schema range
+      // and let ModelConfigSchema re-validate the final value.
+      maxSteps: Number.isFinite(maxSteps) ? maxSteps : 99,
       createdAt: now(),
     };
     const parsed = ModelConfigSchema.safeParse(candidate);
@@ -104,12 +121,13 @@ function ConfigForm() {
       return;
     }
     try {
-      await upsertConfig(parsed.data);
-      if (makeDefault) await setActiveConfig(parsed.data.id);
+      await dbMsg({ type: 'db:upsert-config', config: parsed.data });
+      if (makeDefault) await dbMsg({ type: 'db:set-active-config', id: parsed.data.id });
       // Reset form
       setName('');
       setApiKey('');
       setBaseUrl('');
+      setMaxSteps(99);
       setOk(true);
       setTimeout(() => setOk(false), 2000);
     } catch (err) {
@@ -220,6 +238,31 @@ function ConfigForm() {
             </div>
           )}
 
+          <div className="space-y-1">
+            <Label htmlFor="maxsteps">Max steps per run</Label>
+            <Input
+              id="maxsteps"
+              type="number"
+              min={1}
+              max={999}
+              step={1}
+              value={maxSteps}
+              onChange={(e) => {
+                // <input type="number"> yields '' when the user clears
+                // the field. Treat that as "leave it alone for now" and
+                // let Zod catch any out-of-range value on submit.
+                const n = e.target.value === '' ? 99 : Number.parseInt(e.target.value, 10);
+                setMaxSteps(Number.isFinite(n) ? n : 99);
+              }}
+              placeholder="99"
+            />
+            <p className="text-xs text-muted-foreground">
+              Cap on how many tool-call steps the agent can take in a single run
+              (1-999, default 99). Raise for long multi-step tasks like
+              "search → click N results → summarize".
+            </p>
+          </div>
+
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -273,6 +316,8 @@ function ConfigRow({ config }: { config: import('@/types').ModelConfig }) {
                 <code>{config.baseUrl}</code>
               </>
             )}
+            {' · max steps: '}
+            <code>{config.maxSteps ?? 99}</code>
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -280,7 +325,7 @@ function ConfigRow({ config }: { config: import('@/types').ModelConfig }) {
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => setActiveConfig(config.id)}
+              onClick={() => dbMsg({ type: 'db:set-active-config', id: config.id })}
               title="Set as default"
             >
               <Star className="h-3.5 w-3.5" />
@@ -289,7 +334,7 @@ function ConfigRow({ config }: { config: import('@/types').ModelConfig }) {
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => deleteConfig(config.id)}
+            onClick={() => dbMsg({ type: 'db:delete-config', id: config.id })}
             title="Delete"
           >
             <Trash2 className="h-3.5 w-3.5 text-destructive" />

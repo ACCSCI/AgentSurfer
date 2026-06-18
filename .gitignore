@@ -28,6 +28,19 @@ coverage/
 playwright-report/
 test-results/
 .e2e/
+.e2e-logs/
+# Vendored browser libs for E2E fixtures (regenerated via `bun run vendor`)
+e2e/fixtures/test-game/vendor/
+
+# Build / artifact dirs that duplicate .output/ (kept locally for ext loading)
+chrome-mv3/
+
+# Local debug / probe artifacts
+.tmp-probe-*.png
+analyze*.cjs
+
+# Claude Code local state (worktrees, session data)
+.claude/
 
 # Editor
 .vscode/*

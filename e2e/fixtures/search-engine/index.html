@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SearchPro — 搜索测试页面</title>
+    <style>
+      /* Viewport-relative layout: adapts to whatever the test chrome window
+         gives us. NO fixed pixel sizes on the outer container — the test
+         fixture extension.ts uses {viewport: 1280x800} but the actual
+         rendered viewport can vary (and dpr is typically 2 in Playwright
+         headless), so we use vw/vh/flex so the layout is always centered
+         and the elements are always in the same RELATIVE position. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          'PingFang SC', 'Microsoft YaHei', Roboto, sans-serif;
+        background: #ffffff;
+        color: #222;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      /* ----- Top: brand area (Baidu-ish logo + tagline) ----- */
+      .brand {
+        margin-top: 8vh;
+        text-align: center;
+      }
+      .brand .logo {
+        font-size: clamp(48px, 8vh, 96px);
+        font-weight: 700;
+        letter-spacing: -2px;
+        line-height: 1;
+        user-select: none;
+      }
+      .brand .logo span:nth-child(1) { color: #2319dc; }
+      .brand .logo span:nth-child(2) { color: #e10602; }
+      .brand .logo span:nth-child(3) { color: #f9a825; }
+      .brand .logo span:nth-child(4) { color: #3385ff; }
+      .brand .logo span:nth-child(5) { color: #2ea043; }
+      .brand .logo span:nth-child(6) { color: #6f42c1; }
+      .brand .logo span:nth-child(7) { color: #d63384; }
+      .brand .logo span:nth-child(8) { color: #fd7e14; }
+      .brand .logo span:nth-child(9) { color: #20c997; }
+      .brand .tagline {
+        margin-top: 1.5vh;
+        font-size: clamp(12px, 1.8vh, 18px);
+        color: #666;
+      }
+
+      /* ----- Middle: search row (mimics Baidu/Bing/Google) ----- */
+      .search-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .search-wrap {
+        display: flex;
+        align-items: stretch;
+      }
+      #search-input {
+        width: clamp(360px, 38vw, 540px);
+        height: clamp(40px, 6vh, 56px);
+        padding: 0 1.2vw;
+        font-size: clamp(14px, 2.2vh, 20px);
+        line-height: 1;
+        border: 2px solid #c8cccf;
+        border-right: none;
+        border-radius: clamp(20px, 3vh, 28px) 0 0 clamp(20px, 3vh, 28px);
+        outline: none;
+        background: #fff;
+        color: #222;
+        box-sizing: border-box;
+      }
+      #search-input:focus {
+        border-color: #3385ff;
+      }
+      #search-button {
+        width: clamp(80px, 9vw, 130px);
+        height: clamp(40px, 6vh, 56px);
+        font-size: clamp(14px, 2.2vh, 20px);
+        font-weight: 600;
+        background: #3385ff;
+        color: #fff;
+        border: 2px solid #3385ff;
+        border-radius: 0 clamp(20px, 3vh, 28px) clamp(20px, 3vh, 28px) 0;
+        cursor: pointer;
+        box-sizing: border-box;
+      }
+      #search-button:hover { background: #2f7ae0; }
+      #search-button:active { background: #2566c8; }
+
+      /* ----- Bottom: big red "开始" button (the trigger the agent must click first) ----- */
+      .start-area {
+        margin-bottom: 8vh;
+        text-align: center;
+      }
+      #start-button {
+        width: clamp(180px, 18vw, 260px);
+        height: clamp(56px, 8vh, 80px);
+        font-size: clamp(20px, 3.5vh, 32px);
+        font-weight: 700;
+        background: #e10602;
+        color: #fff;
+        border: none;
+        border-radius: clamp(28px, 4vh, 40px);
+        cursor: pointer;
+        box-shadow: 0 4px 18px rgba(225, 6, 2, 0.35);
+      }
+      #start-button:hover { background: #c80502; }
+      #start-button.clicked {
+        background: #2ea043;
+        box-shadow: 0 4px 18px rgba(46, 160, 67, 0.35);
+      }
+      #start-hint {
+        margin-top: 1.2vh;
+        font-size: clamp(11px, 1.5vh, 14px);
+        color: #999;
+      }
+
+      /* ----- Status strip (top-right) — visible to the agent so it can
+         verify state transitions without scrolling or hovering. Also
+         displays the CURRENT screenshot pixel center of every interactive
+         element so the agent doesn't have to guess coordinates. ----- */
+      .status {
+        position: fixed;
+        right: 1.5vw;
+        top: 1vh;
+        font-size: clamp(11px, 1.5vh, 14px);
+        color: #555;
+        font-family: ui-monospace, monospace;
+        user-select: none;
+        z-index: 10;
+        background: rgba(255, 255, 255, 0.85);
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid #ddd;
+      }
+
+      /* When the input is disabled (initial state), grey it out clearly so
+         the agent understands it can't type yet. */
+      #search-input:disabled,
+      #search-button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body data-state="initial" data-query="">
+    <div class="status" id="status-strip">state: initial</div>
+
+    <div class="brand">
+      <div class="logo">
+        <span>S</span><span>e</span><span>a</span><span>r</span><span>c</span><span>h</span><span>P</span><span>r</span><span>o</span>
+      </div>
+      <div class="tagline">高度模仿百度、Bing、Google 的搜索测试页面</div>
+    </div>
+
+    <div class="search-row">
+      <div class="search-wrap">
+        <input
+          id="search-input"
+          type="text"
+          data-testid="search-input"
+          autocomplete="off"
+          placeholder="请输入搜索内容…"
+          disabled
+        />
+        <button
+          id="search-button"
+          type="button"
+          data-testid="search-button"
+          disabled
+        >
+          搜一下
+        </button>
+      </div>
+    </div>
+
+    <div class="start-area">
+      <button id="start-button" type="button" data-testid="start-button">
+        开始
+      </button>
+      <div id="start-hint">先点底部「开始」按钮，再使用搜索框</div>
+    </div>
+
+    <script>
+      // ----- State machine -----
+      // body.dataset.state ∈ {"initial", "started", "typed", "searched"}
+      // body.dataset.query = the text that was typed into the input
+      //
+      // Why: the E2E test asserts on these values (not on a hidden sentinel
+      // variable) so the agent can verify success visually too.
+
+      const startBtn = document.getElementById('start-button');
+      const startHint = document.getElementById('start-hint');
+      const searchInput = document.getElementById('search-input');
+      const searchBtn = document.getElementById('search-button');
+      const statusStrip = document.getElementById('status-strip');
+
+      function setState(next, query) {
+        document.body.dataset.state = next;
+        if (query !== undefined) document.body.dataset.query = query;
+        statusStrip.textContent =
+          `state: ${next}` + (query ? ` q=${JSON.stringify(query)}` : '');
+      }
+
+      // Step 1 — Start button. Activates the search row.
+      startBtn.addEventListener('click', () => {
+        if (document.body.dataset.state !== 'initial') return;
+        startBtn.classList.add('clicked');
+        startBtn.textContent = '✓ 已开始';
+        startBtn.style.background = '#2ea043';
+        startHint.textContent = '现在点击上面的搜索框并输入内容';
+        searchInput.disabled = false;
+        searchBtn.disabled = false;
+        searchInput.focus();
+        setState('started');
+      });
+
+      // Step 2 — Typing into the search input.
+      searchInput.addEventListener('input', () => {
+        if (document.body.dataset.state === 'started') {
+          setState('typed', searchInput.value);
+        }
+      });
+
+      // Step 3 — Search button. Final state.
+      searchBtn.addEventListener('click', () => {
+        if (document.body.dataset.state !== 'typed') return;
+        setState('searched', searchInput.value);
+      });
+
+      // Also accept Enter from the input.
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && document.body.dataset.state === 'typed') {
+          setState('searched', searchInput.value);
+        }
+      });
+    </script>
+  </body>
+</html>

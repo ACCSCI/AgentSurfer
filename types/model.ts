@@ -103,6 +103,12 @@ export const ModelConfigSchema = z
     apiKey: z.string().default(''),
     baseUrl: z.string().url().nullable().default(null),
     isDefault: z.boolean().default(false),
+    // AI SDK maxSteps passed to streamText. Configurable from the
+    // options page; default 99 (raised from the historical 30 — long
+    // multi-step tasks like "search → click 3 links → summarize" need
+    // room for visual servoing iterations). 1-999 to keep the input
+    // bounded; the AI SDK does not enforce an upper limit.
+    maxSteps: z.number().int().min(1).max(999).default(99),
     createdAt: z.number().int().nonnegative(),
   })
   .superRefine((cfg, ctx) => {

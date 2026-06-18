@@ -6,8 +6,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
-import { db, getToolConfigs, setToolEnabled } from '@/lib/db';
+import { getToolConfigs } from '@/lib/db';
+import { useChangeCount } from '@/lib/use-change-count';
+import { sendToSW } from '@/lib/sw-messenger';
 import { ALL_TOOLS, type ToolName } from '@/types';
+
+async function dbMsg(message: { type: string; [k: string]: unknown }): Promise<void> {
+  const res = await sendToSW(message);
+  if (!res.ok) throw new Error(res.error ?? 'db message failed');
+}
 
 const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   focusNext: 'Tab forward through focusable elements',
@@ -17,21 +24,32 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   tabsList: 'List all open tabs',
   tabsSwitch: 'Switch to a specific tab',
   tabsOpen: 'Open a new tab at a URL',
+  tabsClose: 'Close a tab by index',
   domQuery: 'Query DOM elements by CSS selector',
   domClick: 'Click an element by CSS selector',
   domType: 'Type text into an input/textarea',
   pressKey: 'Send a keyboard event (Enter, Tab, Escape…)',
+  cdpAim: 'Highlight a DOM element at coordinates (x, y)',
+  cdpConfirm: 'Confirm a click target at coordinates (x, y)',
+  cdpScroll: 'Scroll the page by delta (x, y)',
+  cdpCancel: 'Cancel the current CDP action',
+  cdpClick: 'Click at coordinates (x, y)',
+  cdpType: 'Type text via CDP keyboard events',
+  cdpPressKey: 'Press a key via CDP (key code)',
+  cdpScreenshot: 'Take a screenshot of the current tab via CDP',
+  todo: 'Update the agent todo list for multi-step planning',
 };
 
 export function ToolConfigPanel() {
+  const toolChangeCount = useChangeCount('toolConfigs');
   const configs = useLiveQuery(
     () => getToolConfigs(),
-    [],
+    [toolChangeCount],
     [],
   );
 
   async function toggle(name: string, enabled: boolean) {
-    await setToolEnabled(name, enabled);
+    await dbMsg({ type: 'db:set-tool-enabled', name, enabled });
   }
 
   if (!configs) return null;

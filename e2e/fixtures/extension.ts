@@ -13,12 +13,195 @@ const SW_LOG = path.resolve('.e2e-logs/sw.log');
 const USER_DATA_ROOT = path.resolve('.e2e-logs/chrome-userdata');
 const SHOTS_ROOT = path.resolve('.e2e-logs');
 
+/**
+ * Module-level log helpers. Specs that need to call these BEFORE
+ * `launchWithExtension()` (e.g. to truncate the log so a prior run
+ * doesn't pollute the new one) cannot reach them through the handle
+ * — the handle doesn't exist yet. So we also export them here at
+ * module scope. See CLAUDE.md §5.3 (clearSWLog before launch).
+ */
+export function readSWLog(): string {
+  try { return readFileSync(SW_LOG, 'utf-8'); } catch { return ''; }
+}
+
+export function clearSWLog(): void {
+  try { writeFileSync(SW_LOG, ''); } catch { /* ignore */ }
+}
+
+/**
+ * Find all SW-log lines containing `haystack`. The `label` arg is kept
+ * for readability at call sites (e.g. `'wall-alarm fired'`) but is not
+ * used in matching — it's purely a doc string.
+ *
+ * Despite the name, this does NOT throw on zero matches. The caller is
+ * expected to wrap the result in `expect(...).toHaveLength(N)`.
+ */
+export function assertLogContains(haystack: string, _label: string): string[] {
+  return readSWLog().split('\n').filter((line) => line.includes(haystack));
+}
+
+/**
+ * Inverse of assertLogContains: returns lines that do NOT contain the
+ * substring. Use to assert "log should be free of X" — e.g.
+ * `expect(assertLogClean('consumeStream error', 'no stream errors')).toHaveLength(0)`.
+ */
+export function assertLogClean(needle: string, _label: string): string[] {
+  return readSWLog().split('\n').filter((line) => line && !line.includes(needle));
+}
+
+/**
+ * Send a `db:*` message to the SW via the `e2e-diag` port and return
+ * the unwrapped `data` field. Throws on `!ok` so callers don't have to
+ * check the envelope (see CLAUDE.md §7.3).
+ */
+export async function dbMsg(page: Page, message: { type: string; [k: string]: unknown }): Promise<unknown> {
+  const res = (await dbMsgPort(page, message)) as { ok: boolean; data?: unknown; error?: string };
+  if (!res?.ok) throw new Error(res?.error ?? `dbMsg ${message.type} failed`);
+  return res.data;
+}
+
+/** Send a raw `db:*` message via the `e2e-diag` port. Returns the full
+ *  `{ok, data, error}` envelope. Prefer `dbMsg` for typed reads. */
+export async function dbMsgPort(page: Page, message: { type: string; [k: string]: unknown }): Promise<unknown> {
+  return page.evaluate(async (msg) => {
+    const port = chrome.runtime.connect({ name: 'e2e-diag' });
+    const result = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('port timeout: ' + msg.type)), 10000);
+      port.onMessage.addListener(function handler(response) {
+        clearTimeout(timeout);
+        port.disconnect();
+        resolve(response);
+      });
+      port.postMessage(msg);
+    });
+    return result;
+  }, message);
+}
+
+/** Wipe Dexie via the `__e2e:reset` SW handler. Wait 200ms after to
+ *  avoid the `db.delete() + db.open()` race noted in CLAUDE.md §7. */
+export async function resetDb(page: Page): Promise<void> {
+  await dbMsgPort(page, { type: '__e2e:reset' });
+  await new Promise((r) => setTimeout(r, 200));
+}
+
+/** E2E helper: list every active chrome.alarms entry. */
+export async function listAlarms(page: Page): Promise<string[]> {
+  return (await dbMsg(page, { type: '__e2e:list-alarms' })) as string[];
+}
+
+/** E2E helper: read every RunRecord from the checkpoint. */
+export async function readCheckpoint(page: Page): Promise<Array<{
+  runId: string;
+  sessionId: string;
+  startMs: number;
+  modelId: string;
+  wallTimeoutMs: number;
+  status: string;
+  lastStepNumber: number;
+}>> {
+  return (await dbMsg(page, { type: '__e2e:read-checkpoint' })) as Array<{
+    runId: string; sessionId: string; startMs: number; modelId: string;
+    wallTimeoutMs: number; status: string; lastStepNumber: number;
+  }>;
+}
+
+/** E2E helper: force the SW to reload via chrome.runtime.reload().
+ *  The Playwright fixture will detect the new SW automatically. */
+export async function simulateSWRestart(page: Page): Promise<void> {
+  await dbMsgPort(page, { type: '__e2e:simulate-sw-restart' });
+}
+
+/** E2E helper: force checkpoint.sweepStaleRuns() to run now. Returns
+ *  the list of abandoned RunRecords. */
+export async function armSweep(page: Page): Promise<Array<{
+  runId: string;
+  sessionId: string;
+  startMs: number;
+  wallTimeoutMs: number;
+}>> {
+  const res = (await dbMsg(page, { type: '__e2e:arm-sweep' })) as {
+    abandonedCount: number;
+    abandoned: Array<{ runId: string; sessionId: string; startMs: number; wallTimeoutMs: number }>;
+  };
+  return res.abandoned;
+}
+
+/** E2E helper: override the agent's wall-clock timeout. */
+export async function setWallTimeout(page: Page, ms: number): Promise<void> {
+  await dbMsgPort(page, { type: '__e2e:set-wall-timeout', ms });
+}
+
+/** E2E helper: read MINIMAX_API_KEY (or other var) from .env. */
+export function readApiKey(varName: string = 'MINIMAX_API_KEY'): string {
+  const txt = readFileSync(pathResolve('.env'), 'utf-8');
+  const m = txt.match(new RegExp(`^${varName}=(.+)$`, 'm'));
+  const v = m?.[1]?.trim();
+  if (!v) throw new Error(`${varName} missing from .env`);
+  return v;
+}
+
+/** E2E helper: poll the SW log until a marker line appears, or throw
+ *  after `timeoutMs`. Use to assert asynchronous events without
+ *  arbitrary setTimeout waits in the test body. */
+export async function waitForLogMarker(
+  marker: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<string[]> {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const intervalMs = opts.intervalMs ?? 100;
+  const deadline = Date.now() + timeoutMs;
+  let last: string[] = [];
+  while (Date.now() < deadline) {
+    last = assertLogContains(marker, marker);
+    if (last.length > 0) return last;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `waitForLogMarker: marker "${marker}" not seen within ${timeoutMs}ms. ` +
+      `Last SW log tail: ${readSWLog().split('\n').slice(-5).join(' | ')}`,
+  );
+}
+
+/**
+ * List every Dexie row + change counter — used by error-handling /
+ * cascade-delete / data-layer specs. Returns a structured snapshot.
+ */
+export async function listAll(page: Page): Promise<{
+  sessions: unknown[];
+  messages: unknown[];
+  agentSteps: unknown[];
+  screenshots: unknown[];
+  modelConfigs: unknown[];
+  toolConfigs: unknown[];
+  changeCounters: Record<string, number>;
+}> {
+  const data = (await dbMsg(page, { type: '__e2e:list-all' })) as {
+    sessions: unknown[];
+    messages: unknown[];
+    agentSteps: unknown[];
+    screenshots: unknown[];
+    modelConfigs: unknown[];
+    toolConfigs: unknown[];
+    changeCounters: Record<string, number>;
+  };
+  return data;
+}
+
 // Always use ABSOLUTE path for the extension dir. Relative paths get
 // normalized by Chrome on Windows which can strip the leading "." —
 // then Chrome reports "清单文件缺失" (manifest missing) because it
 // looks at `output\chrome-mv3` (no dot) instead of `.output\chrome-mv3`.
 const PROJECT_ROOT = path.resolve('.');
-const EXTENSION_PATH = path.join(PROJECT_ROOT, '.output', 'chrome-mv3');
+// Allow override via env var (e.g. when wxt's `.output` build dir is
+// being stripped of its leading dot by Chrome on Windows — point the
+// fixture at a junction/symlink with a non-dot name, e.g.
+//   mklink /J D:\Projects\BrowserAI\chrome-mv3 D:\Projects\BrowserAI\.output\chrome-mv3
+//   EXTENSION_PATH=D:\Projects\BrowserAI\chrome-mv3 bun run e2e -- ...
+// ).
+const EXTENSION_PATH = process.env.EXTENSION_PATH
+  ? path.resolve(process.env.EXTENSION_PATH)
+  : path.join(PROJECT_ROOT, '.output', 'chrome-mv3');
 
 // All non-todo tool names. `todo` is always added by the agent runtime
 // (lib/agent.ts) and cannot be disabled.
@@ -140,14 +323,20 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   } else {
     const ev = await ctx.waitForEvent('serviceworker', {
       predicate: isOurSw,
-      timeout: 20_000,
+      // Bumped from 20s → 40s to absorb the SW register race documented
+      // in CLAUDE.md §7.8 / §6.1 P0.10. Chrome can half-load the
+      // extension and report "manifest missing" before Playwright's
+      // listener attaches; the longer window gives the SW a real
+      // chance to register. The race-safe pattern above (poll first,
+      // then predicate-filtered wait) is unchanged.
+      timeout: 40_000,
     }).catch(() => null);
     if (ev) {
       sw = ev;
       traceEnd('3 sw register (event)', { swUrl: ev.url(), via: 'event+predicate' });
     } else {
-      traceFail('3 sw register', new Error('SW never registered in 20s'));
-      throw new Error('Service worker did not register within 20s. Check .output/chrome-mv3/manifest.json exists and has no syntax errors.');
+      traceFail('3 sw register', new Error('SW never registered in 40s'));
+      throw new Error('Service worker did not register within 40s. Check .output/chrome-mv3/manifest.json exists and has no syntax errors. See CLAUDE.md §7.8.');
     }
   }
   // Forward SW console + network to the test runner so we can see what's
@@ -318,16 +507,11 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
   // ============================================================
   // Live-LLM E2E helpers (specs 20 / 21 / 22)
   // ============================================================
-
-  /** Truncate the SW console log. Call BEFORE launch so old runs don't pollute. */
-  function clearSWLog() {
-    try { writeFileSync(SW_LOG, ''); } catch { /* ignore */ }
-  }
-
-  /** Read the entire SW log (used for diagnostics after a run). */
-  function readSWLog(): string {
-    try { return readFileSync(SW_LOG, 'utf-8'); } catch { return ''; }
-  }
+  // The log helpers (clearSWLog / readSWLog / assertLogContains) are
+  // exported at module scope (see top of file) so specs can call them
+  // BEFORE launchWithExtension returns. The handle returned below
+  // re-exports the same functions for callers that already hold the
+  // handle — there's only one implementation, both bindings point to it.
 
   /** Send a db:* SW message and return the unwrapped data (ok branch). */
   async function dbMsg(page: Page, message: { type: string; [k: string]: unknown }): Promise<unknown> {
@@ -457,6 +641,6 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
     ctx, extId, sw, openSidePanel, openOptions, seedMockConfig, seedLiveConfig, cleanup,
     clearSWLog, dbMsg, resetDb, enableOnlyTools, setReactTextareaValue, captureSnapshots,
     readApiKey, inspectTabs, setWallTimeout, getAssistantTextLength, isAgentRunning, readSWLog,
-    listAgentSteps, listMessages,
+    assertLogContains, listAgentSteps, listMessages,
   };
 }

@@ -28,6 +28,7 @@ export type MessageRole = z.infer<typeof MessageRoleSchema>;
 export const MessagePartSchema = z.object({
   type: z.enum(['text', 'image', 'tool-call', 'tool-result', 'reasoning']),
   text: z.string().optional(),
+  reasoning: z.string().optional(),
   imageRef: z.string().optional(), // ScreenshotMeta.id when type=image
   toolCall: z
     .object({
@@ -46,6 +47,9 @@ export const MessagePartSchema = z.object({
 });
 export type MessagePart = z.infer<typeof MessagePartSchema>;
 
+export const ChatMessageStatusSchema = z.enum(['draft', 'complete', 'abandoned', 'error']);
+export type ChatMessageStatus = z.infer<typeof ChatMessageStatusSchema>;
+
 export const ChatMessageSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
@@ -56,6 +60,10 @@ export const ChatMessageSchema = z.object({
   // Screenshots attached to this message (for replay/UI).
   screenshotIds: z.array(z.string()).default([]),
   createdAt: z.number().int().nonnegative(),
+  // MessageStore lifecycle status. Old messages (v1/v2) won't have this —
+  // treat as 'complete' for back-compat. See message-store.ts.
+  status: ChatMessageStatusSchema.optional(),
+  updatedAt: z.number().int().nonnegative().optional(),
 });
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 

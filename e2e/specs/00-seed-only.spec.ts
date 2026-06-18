@@ -19,38 +19,46 @@ test.describe('seed only (no agent)', () => {
       const { page: sidePanel } = await ext.openSidePanel();
       await sidePanel.waitForSelector('text=AgentSurfer');
 
-      // Set the input + submit the message directly via the page context.
-      // This avoids any UI re-render race.
+      // Use Promise-based sendMessage with explicit lastError check.
       const result = await sidePanel.evaluate(
         async ({ provider, apiKey }) => {
           const cfg = {
             id: `e2e-${provider}-${Date.now()}`,
             name: `${provider} (live E2E)`,
             provider,
-            modelId: 'MiniMax-M2.7-highspeed',
+            modelId: 'MiniMax-M3',
             apiKey,
             baseUrl: null,
             isDefault: true,
             createdAt: Date.now(),
           };
-          const log: string[] = [];
-          const origLog = console.log;
-          console.log = (...a: unknown[]) => {
-            const line = a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ');
-            log.push(line);
-            origLog(...a);
-          };
-          const seed = await chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg });
-          const inspect = await chrome.runtime.sendMessage({ type: '__e2e:inspect' });
-          return { seed, inspect, log };
+          const seed = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg }, (response) => {
+              if (chrome.runtime.lastError) reject(new Error('seed lastError: ' + chrome.runtime.lastError.message));
+              else resolve(response);
+            });
+          });
+          const inspect = await new Promise((resolve, reject) => {
+            chrome.runtime.sendMessage({ type: '__e2e:inspect' }, (response) => {
+              if (chrome.runtime.lastError) reject(new Error('inspect lastError: ' + chrome.runtime.lastError.message));
+              else resolve(response);
+            });
+          });
+          return { seed, inspect };
         },
         { provider: 'MiniMax', apiKey },
       );
       console.log('[seed result]', JSON.stringify(result, null, 2));
+      // SW wraps responses as { ok: true, data: ... } where data is the handler result
       expect(result.seed, 'seed returned').toBeTruthy();
       expect(result.seed.ok, 'seed ok').toBe(true);
       expect(result.inspect, 'inspect returned').toBeTruthy();
-      expect(result.inspect.configs, 'inspect has configs count').toBeGreaterThan(0);
+      // inspect.data should be the object { configs, activeConfig, sessions, ... }
+      const inspectData = (result.inspect as { data?: unknown })?.data;
+      expect(inspectData, 'inspect has data').toBeTruthy();
+      const configs = (inspectData as { configs?: unknown[] }).configs;
+      expect(configs, 'inspect has configs count').toBeDefined();
+      expect(Array.isArray(configs) ? configs.length : 0, 'inspect has configs count').toBeGreaterThan(0);
     } finally {
       await ext.cleanup();
     }

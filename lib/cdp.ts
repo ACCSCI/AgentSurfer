@@ -126,6 +126,63 @@ export class CDPService {
     });
   }
 
+  /**
+   * Drag from (x1, y1) to (x2, y2) using native CDP mouse events.
+   *
+   * Semantics differ from `click()` in three critical ways (see P0 test-game
+   * plan, §cdpDrag):
+   *   1. `mousePressed` and every intermediate `mouseMoved` carry `buttons: 1`.
+   *      PixiJS / DOM `mousedown` handlers check `event.buttons` to detect
+   *      drag-state — without `buttons: 1`, the move events are treated as
+   *      "hover, no button held" and drag is broken.
+   *   2. `mouseReleased` carries `clickCount: 0` (not 1). With `clickCount: 1`
+   *      Chrome fires a dblclick after the release, which PixiJS would
+   *      route to the ball as a separate event, breaking drag handlers.
+   *   3. Inter-step delay is 30-40 ms (longer than click()'s 8-15 ms in
+   *      `mouseMove`). PixiJS's InteractionManager debounces by frame and
+   *      needs visible time between moves to render drag-over states.
+   *
+   * @param x1 CSS-pixel X of drag start.
+   * @param y1 CSS-pixel Y of drag start.
+   * @param x2 CSS-pixel X of drag end.
+   * @param y2 CSS-pixel Y of drag end.
+   * @param steps Number of intermediate `mouseMoved` events. Default 24,
+   *              chosen empirically for PixiJS collision detection reliability.
+   */
+  async drag(x1: number, y1: number, x2: number, y2: number, steps = 24): Promise<void> {
+    log.info('cdp', 'drag', { runId: this.runId, x1, y1, x2, y2, steps });
+    await this.mouseMove(x1, y1);
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      button: 'left',
+      x: x1,
+      y: y1,
+      clickCount: 1,
+      buttons: 1,
+    });
+    await sleep(50 + Math.random() * 30);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const px = Math.round(x1 + (x2 - x1) * t);
+      const py = Math.round(y1 + (y2 - y1) * t);
+      await this.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: px,
+        y: py,
+        buttons: 1,
+      });
+      await sleep(30 + Math.random() * 10);
+    }
+    await this.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      button: 'left',
+      x: x2,
+      y: y2,
+      clickCount: 0, // NOT 1 — see method comment
+      buttons: 0,
+    });
+  }
+
   async mouseMove(x: number, y: number): Promise<void> {
     const start = this.lastMousePos;
     const steps = 8;
@@ -226,6 +283,14 @@ export class CDPService {
       // Tiny wait for the swap to settle (rendering layer has to update).
       await new Promise((r) => setTimeout(r, 50));
     }
+    // CDP `Overlay.highlightQuad` returns as soon as the command is queued,
+    // but the GPU compositor hasn't necessarily painted the overlay into the
+    // framebuffer yet. If we call `captureVisibleTab` immediately, we get
+    // `BEFORE` (= no overlay) ~80% of the time, or a partial intermediate
+    // frame the other ~20%. 200ms is enough to let the compositor catch
+    // up in headless Playwright; the `__e2e:coord-mapping` / `__e2e:overlay-probe`
+    // handlers already use the same wait.
+    await new Promise((r) => setTimeout(r, 200));
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
     // dataUrl is "data:image/png;base64,<base64>" — strip the prefix.
     const base64 = dataUrl.startsWith('data:image/png;base64,')

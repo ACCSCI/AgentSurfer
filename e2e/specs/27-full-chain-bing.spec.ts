@@ -40,9 +40,9 @@ test('Full chain: Bing search LLM, click 3 links, summarize, cleanup', async () 
     await ext.resetDb(sidePanel);
     await ext.seedLiveConfig(sidePanel, 'MiniMax', apiKey);
     await sidePanel.reload();
-    await sidePanel.waitForSelector('text=MiniMax-M2.7-highspeed', { timeout: 15_000 });
+    await sidePanel.waitForSelector('text=MiniMax-M3', { timeout: 15_000 });
     await ext.enableOnlyTools(sidePanel, FULL_TOOLS);
-    await ext.setWallTimeout(sidePanel, 240_000); // 4 min wall
+    await ext.setWallTimeout(sidePanel, 180_000); // 3 min wall — only extend when 90% confident agent can complete
 
     // Pre-open bing.com so the LLM doesn't have to.
     const bingPage = await ext.ctx.newPage();
@@ -52,7 +52,7 @@ test('Full chain: Bing search LLM, click 3 links, summarize, cleanup', async () 
     const beforeTabs = await ext.inspectTabs(sidePanel);
     console.log(`[27] tabs before: ${beforeTabs.count} — ${beforeTabs.urls.join(', ')}`);
 
-    const prompt = '打开bing，搜索LLM，点击前三个有用的链接，阅读后总结，结束后清理标签页';
+    const prompt = '用 todo 工具按以下 5 步执行：\n1) 打开 bing.com\n2) 在搜索框输入"LLM"并按回车，等结果\n3) 点击前 3 个有用的搜索结果链接（每个都要打开、阅读、然后返回搜索结果页再点下一个，**必须点满 3 个，不要少于 3 个**）\n4) 阅读完 3 个链接后，**用中文写一个总结**（说明 LLM 是什么、关键点），总结必须是 assistant 的最终文本回复\n5) 关闭任务过程中打开的所有额外标签页，只保留原始的 bing 搜索结果页和侧边栏';
     await ext.setReactTextareaValue(sidePanel, 'textarea', prompt);
     await sidePanel.locator('button[title="Send"]').click();
 

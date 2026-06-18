@@ -30,12 +30,14 @@ export default defineConfig({
   ],
 
   // Build the extension before running. Skipped if SKIP_BUILD=1 (dev loop).
+  // Note: the E2E fixture loads files from .output/chrome-mv3/ directly —
+  // no HTTP server is needed for the extension itself. The e2e/fixtures/serve.ts
+  // server is started separately by tests that need it (e.g. google search).
   webServer: process.env.SKIP_BUILD
     ? undefined
     : {
         command: 'bun run build',
-        port: PORT,
-        reuseExistingServer: !process.env.CI,
+        // No port needed — build exits when done.
         timeout: 120_000,
         stdout: 'ignore',
         stderr: 'pipe',

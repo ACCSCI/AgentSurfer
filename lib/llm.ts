@@ -37,7 +37,7 @@ export const KnownModels: Record<Provider, readonly string[]> = {
     'MiniMax-M2.1-highspeed',
     'MiniMax-M2',
   ],
-  mock: ['mock:happy', 'mock:oneTool', 'mock:textOnly', 'mock:clickSequence', 'mock:failsAtStep3'],
+  mock: ['mock:happy', 'mock:oneTool', 'mock:textOnly', 'mock:clickSequence', 'mock:failsAtStep3', 'mock:echoHistory'],
 };
 
 export function listModels(provider: Provider): readonly string[] {

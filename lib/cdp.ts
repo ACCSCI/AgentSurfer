@@ -263,7 +263,6 @@ export class CDPService {
    *   - Requires the tab to be the active tab in its window
    *     (call `tabsSwitch` or focus it first).
    *   - The user can also see the crosshair in their browser.
-   *   - PNG dimensions come from the IHDR header. dpr = screenshotWidth / tab.width.
    */
   async screenshot(): Promise<{ dataUrl: string; width: number; height: number }> {
     log.info('cdp', 'screenshot', { runId: this.runId });
@@ -274,57 +273,64 @@ export class CDPService {
     if (tab.windowId == null) {
       throw new Error('cdp.screenshot: tab has no windowId');
     }
-    // chrome.tabs.captureVisibleTab requires the captured tab to be the
-    // ACTIVE tab in its window. If the user has another tab focused in
-    // the same window, the call throws "Tab cannot be captured".
-    // We activate the target tab first, then capture.
     if (!tab.active) {
       await chrome.tabs.update(this.tabId, { active: true });
       // Tiny wait for the swap to settle (rendering layer has to update).
       await new Promise((r) => setTimeout(r, 50));
     }
-    // CDP `Overlay.highlightQuad` returns as soon as the command is queued,
-    // but the GPU compositor hasn't necessarily painted the overlay into the
-    // framebuffer yet. If we call `captureVisibleTab` immediately, we get
-    // `BEFORE` (= no overlay) ~80% of the time, or a partial intermediate
-    // frame the other ~20%. 200ms is enough to let the compositor catch
-    // up in headless Playwright; the `__e2e:coord-mapping` / `__e2e:overlay-probe`
-    // handlers already use the same wait.
+    // Wait for the GPU compositor to paint any pending overlay into the
+    // framebuffer (otherwise we get a partial "BEFORE" ~20% of the time).
     await new Promise((r) => setTimeout(r, 200));
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    // dataUrl is "data:image/png;base64,<base64>" — strip the prefix.
-    const base64 = dataUrl.startsWith('data:image/png;base64,')
-      ? dataUrl.slice('data:image/png;base64,'.length)
-      : dataUrl;
-    // Parse PNG IHDR to get real pixel dimensions (dpr-aware).
-    // SW has no `Buffer` — use atob + Uint8Array + DataView.
+    const rawDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+
+    // Target dimensions — CSS pixels per `chrome.tabs.Tab` docs (window.innerWidth).
+    const cssWidth = tab.width ?? 0;
+    const cssHeight = tab.height ?? 0;
+
+    // Decode raw PNG bytes (SW has no Buffer — use atob + Uint8Array).
+    const base64 = rawDataUrl.startsWith('data:image/png;base64,')
+      ? rawDataUrl.slice('data:image/png;base64,'.length)
+      : rawDataUrl;
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    // No target dimensions, or raw capture already matches CSS — return as-is.
+    if (!cssWidth || !cssHeight) {
+      return { dataUrl: rawDataUrl, width: 0, height: 0 };
+    }
     const view = new DataView(bytes.buffer);
-    const width = view.getUint32(16, false);
-    const height = view.getUint32(20, false);
-    // Cache dpr so cdpAim / cdpConfirm / cdpClick can convert
-    // screenshot pixels → CSS pixels without re-screenshotting.
-    if (tab.width && width) this.lastDpr = width / tab.width;
-    return { dataUrl, width, height };
+    const rawWidth = view.getUint32(16, false);
+    const rawHeight = view.getUint32(20, false);
+    if (rawWidth === cssWidth && rawHeight === cssHeight) {
+      return { dataUrl: rawDataUrl, width: cssWidth, height: cssHeight };
+    }
+
+    // Resize device-pixel PNG → CSS-pixel PNG via OffscreenCanvas.
+    log.info('cdp', 'screenshot resize', {
+      runId: this.runId,
+      from: `${rawWidth}x${rawHeight}`,
+      to: `${cssWidth}x${cssHeight}`,
+    });
+    const blob = new Blob([bytes], { type: 'image/png' });
+    const bitmap = await createImageBitmap(blob);
+    const canvas = new OffscreenCanvas(cssWidth, cssHeight);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('cdp.screenshot: OffscreenCanvas 2d context unavailable');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bitmap, 0, 0, cssWidth, cssHeight);
+    bitmap.close();
+    const resizedBlob = await canvas.convertToBlob({ type: 'image/png' });
+    const resizedDataUrl = await blobToDataUrl(resizedBlob);
+    return { dataUrl: resizedDataUrl, width: cssWidth, height: cssHeight };
   }
 
   private lastAimPos: { x: number; y: number } = { x: 0, y: 0 };
-  /**
-   * dpr from the most recent screenshot() call. Computed as
-   * `screenshotWidth / tab.width`. Tools that need to convert
-   * screenshot pixels → CSS pixels (cdpAim / cdpConfirm / cdpClick)
-   * read this. Without this they'd have to take their own screenshot
-   * every call (slow) or use a stale value.
-   */
-  private lastDpr = 1;
 
   /** Get the last aim position (for scroll, etc.). */
   get aimX(): number { return this.lastAimPos.x; }
   get aimY(): number { return this.lastAimPos.y; }
-  /** dpr from the most recent screenshot() — used by tools to convert screenshot px → CSS px. */
-  get dpr(): number { return this.lastDpr; }
 
   // ---------- Visual feedback (CDP Overlay, with LLM-chosen color) ----------
   //
@@ -452,4 +458,14 @@ const KEY_MAP: Record<string, { code: string; windowsVirtualKeyCode: number }> =
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Convert a Blob to a "data:..." URL. Used by screenshot() after resize. */
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
 }

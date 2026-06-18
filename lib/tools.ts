@@ -490,21 +490,20 @@ import { getCurrentCDP } from '@/lib/cdp';
 
 export const cdpClick = tool({
   description:
-    'Click at a SCREENSHOT coordinate (x, y) using native CDP mouse events. Use domQuery first to find the element and get its bounding box, then pass the center coordinates here (in SCREENSHOT pixel space, the same as the image you see).',
+    'Click at (x, y) using native CDP mouse events. Coordinates are in the same space as the image you see (CSS pixels, since cdpScreenshot now resizes to CSS dimensions).',
   parameters: z.object({
-    x: z.number().int().min(0).describe('SCREENSHOT X coordinate (same units as the image you see)'),
-    y: z.number().int().min(0).describe('SCREENSHOT Y coordinate (same units as the image you see)'),
+    x: z.number().int().min(0).describe('X coordinate (same units as the image you see from cdpScreenshot)'),
+    y: z.number().int().min(0).describe('Y coordinate (same units as the image you see from cdpScreenshot)'),
   }),
   execute: async ({ x, y }) => {
     const cdp = getCurrentCDP();
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
-    // Convert screenshot px -> CSS px using the cached dpr.
-    const dpr = cdp.dpr;
-    const cssX = Math.round(x / dpr);
-    const cssY = Math.round(y / dpr);
-    await cdp.click(cssX, cssY);
+    // Coordinates are already in CSS pixels (cdpScreenshot now resizes
+    // the captured PNG to tab.width × tab.height so it matches what the
+    // LLM sees in the image). Pass through directly.
+    await cdp.click(x, y);
     return { ok: true, x, y };
   },
 });
@@ -545,7 +544,7 @@ export const cdpPressKey = tool({
 
 export const cdpScreenshot = tool({
   description:
-    'Take a screenshot of the active tab using CDP (more reliable than the JS-based screenshot).',
+    'Take a screenshot of the active tab using CDP. The returned image is at CSS pixel dimensions (the same as the rendered page), so the (x, y) you pass to cdpAim / cdpConfirm / cdpClick / cdpDrag / cdpType are in the SAME space as what you see in the image — no conversion needed.',
   parameters: z.object({}).strict(),
   execute: async () => {
     const cdp = getCurrentCDP();
@@ -556,20 +555,19 @@ export const cdpScreenshot = tool({
     }
     await cdp.attach(tab.id);
     const shot = await cdp.screenshot();
-    const dpr = tab.width ? shot.width / tab.width : 1;
+    // shot.width / shot.height are already CSS pixels — cdp.screenshot()
+    // resizes the device-pixel PNG to tab.width × tab.height before
+    // returning, so the LLM, the image, and click coords share one space.
     return {
       dataUrl: shot.dataUrl,
-      width: tab.width ?? 0,
-      height: tab.height ?? 0,
-      screenshotWidth: shot.width,
-      screenshotHeight: shot.height,
-      dpr,
+      width: shot.width,
+      height: shot.height,
     };
   },
   experimental_toToolResultContent: (output: { dataUrl?: string; width?: number; height?: number; error?: string }) => {
     if (!output.dataUrl) return [{ type: 'text', text: output.error ?? 'Screenshot failed' }];
     return [
-      { type: 'text', text: `Screenshot captured (${output.width ?? 0}x${output.height ?? 0}px).` },
+      { type: 'text', text: `Screenshot captured (${output.width ?? 0}x${output.height ?? 0}px, CSS pixels — same as the rendered page).` },
       { type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' },
     ];
   },
@@ -594,42 +592,30 @@ export const cdpAim = tool({
     // Pre-screenshot BEFORE drawing the crosshair so the LLM can compare
     // before/after and verify the crosshair actually landed where it asked.
     const before = await cdp.screenshot();
-    // x, y, size arrive in SCREENSHOT pixels (what the LLM sees in the
-    // image). Convert to CSS pixels using the cached dpr from the previous
-    // screenshot() call — the LLM never has to think about dpr, DPR, or
-    // any device-vs-CSS distinction.
-    const dpr = cdp.dpr;
-    const cssX = Math.round(x / dpr);
-    const cssY = Math.round(y / dpr);
-    const cssSize = Math.round(size / dpr);
-    await cdp.highlightQuad(cssX, cssY, cssSize, color);
+    // x, y, size are CSS pixels (same as what the LLM sees — cdp.screenshot
+    // resizes the PNG to tab.width × tab.height before returning).
+    // Pass them straight through to highlightQuad (which also uses CSS px).
+    await cdp.highlightQuad(x, y, size, color);
     const after = await cdp.screenshot();
     return {
       dataUrl: after.dataUrl,
       beforeDataUrl: before.dataUrl,
-      // Report the screenshot dimensions so the LLM knows the coordinate
-      // space it should keep using. dpr and CSS dimensions are kept for
-      // debugging but the LLM is no longer expected to divide by dpr.
-      width: tab.width ?? 0,
-      height: tab.height ?? 0,
-      screenshotWidth: after.width,
-      screenshotHeight: after.height,
-      dpr,
-      aimX: x,                           // screenshot px (matches the caller's intent)
+      width: after.width,
+      height: after.height,
+      aimX: x,
       aimY: y,
       color,
     };
   },
   experimental_toToolResultContent: (output: {
     dataUrl: string; beforeDataUrl?: string;
-    width: number; height: number; dpr: number;
-    screenshotWidth?: number; screenshotHeight?: number;
+    width: number; height: number;
     aimX: number; aimY: number;
   }) => {
-    const sw = output.screenshotWidth ?? output.width;
-    const sh = output.screenshotHeight ?? output.height;
-    const cx = Math.floor((sw ?? 0) / 2);
-    const cy = Math.floor((sh ?? 0) / 2);
+    const sw = output.width ?? 0;
+    const sh = output.height ?? 0;
+    const cx = Math.floor(sw / 2);
+    const cy = Math.floor(sh / 2);
     const text = [
       `AIMED at (${output.aimX}, ${output.aimY}).`,
       `Screen center: (${cx}, ${cy}) — calling cdpAim(${cx}, ${cy}) puts the crosshair at the visual middle of the screen.`,
@@ -650,22 +636,18 @@ export const cdpAim = tool({
 
 export const cdpConfirm = tool({
   description:
-    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — never call cdpClick directly. The x, y must be in SCREENSHOT pixel space (the same as the cdpAim coordinates).',
+    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — never call cdpClick directly. x, y are in the same space as cdpAim coordinates (CSS pixels).',
   parameters: z.object({
-    x: z.number().int().min(0).describe('SCREENSHOT X coordinate (must match the cdpAim coordinates)'),
-    y: z.number().int().min(0).describe('SCREENSHOT Y coordinate (must match the cdpAim coordinates)'),
+    x: z.number().int().min(0).describe('X coordinate (same units as the image and as cdpAim)'),
+    y: z.number().int().min(0).describe('Y coordinate (same units as the image and as cdpAim)'),
   }),
   execute: async ({ x, y }) => {
     const cdp = getCurrentCDP();
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
-    // Convert screenshot px -> CSS px using the cached dpr.
-    const dpr = cdp.dpr;
-    const cssX = Math.round(x / dpr);
-    const cssY = Math.round(y / dpr);
     await cdp.clearHighlight();
-    await cdp.click(cssX, cssY);
+    await cdp.click(x, y);
     return { ok: true, x, y };
   },
 });
@@ -677,32 +659,27 @@ export const cdpConfirm = tool({
  * drag, etc.). The button stays pressed (`buttons: 1`) throughout the move,
  * which is required for drag-state in PixiJS InteractionManager.
  *
- * Coordinates are SCREENSHOT pixels (the same units as the image you see
- * from cdpScreenshot). The tool converts internally using the cached dpr,
- * matching the conversion done by cdpClick / cdpConfirm.
+ * Coordinates are CSS pixels (the same units as the image you see from
+ * cdpScreenshot).
  */
 export const cdpDrag = tool({
   description:
     'Drag from (x1, y1) to (x2, y2) using native CDP mouse events (buttons:1 held throughout). ' +
-    'Use for canvas drag-and-drop interactions. Coordinates are SCREENSHOT pixels (same as image).',
+    'Use for canvas drag-and-drop interactions. Coordinates are CSS pixels (same as the image from cdpScreenshot).',
   parameters: z.object({
-    x1: z.number().int().min(0).describe('SCREENSHOT X of drag start'),
-    y1: z.number().int().min(0).describe('SCREENSHOT Y of drag start'),
-    x2: z.number().int().min(0).describe('SCREENSHOT X of drag end'),
-    y2: z.number().int().min(0).describe('SCREENSHOT Y of drag end'),
+    x1: z.number().int().min(0).describe('X of drag start'),
+    y1: z.number().int().min(0).describe('Y of drag start'),
+    x2: z.number().int().min(0).describe('X of drag end'),
+    y2: z.number().int().min(0).describe('Y of drag end'),
   }),
   execute: async ({ x1, y1, x2, y2 }) => {
     const cdp = getCurrentCDP();
     if (!cdp) throw new Error('CDP not available');
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
-    // Convert screenshot px -> CSS px using the cached dpr.
-    const dpr = cdp.dpr;
-    const cssX1 = Math.round(x1 / dpr);
-    const cssY1 = Math.round(y1 / dpr);
-    const cssX2 = Math.round(x2 / dpr);
-    const cssY2 = Math.round(y2 / dpr);
-    await cdp.drag(cssX1, cssY1, cssX2, cssY2);
+    // Coordinates are already in CSS pixels — same as the cdpScreenshot
+    // image the LLM sees, same as cdpClick / cdpConfirm / highlightQuad.
+    await cdp.drag(x1, y1, x2, y2);
     return { ok: true, x1, y1, x2, y2 };
   },
 });

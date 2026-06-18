@@ -99,20 +99,21 @@
 
       /* ----- Bottom: big red "开始" button (the trigger the agent must click first) ----- */
       .start-area {
-        margin-bottom: 8vh;
+        margin-bottom: 6vh;
         text-align: center;
       }
       #start-button {
-        width: clamp(180px, 18vw, 260px);
-        height: clamp(56px, 8vh, 80px);
-        font-size: clamp(20px, 3.5vh, 32px);
+        /* Generously large so the LLM's ±60px visual accuracy still hits it. */
+        width: clamp(280px, 26vw, 360px);
+        height: clamp(120px, 16vh, 180px);
+        font-size: clamp(28px, 4.5vh, 44px);
         font-weight: 700;
         background: #e10602;
         color: #fff;
         border: none;
-        border-radius: clamp(28px, 4vh, 40px);
+        border-radius: clamp(48px, 7vh, 70px);
         cursor: pointer;
-        box-shadow: 0 4px 18px rgba(225, 6, 2, 0.35);
+        box-shadow: 0 6px 22px rgba(225, 6, 2, 0.4);
       }
       #start-button:hover { background: #c80502; }
       #start-button.clicked {

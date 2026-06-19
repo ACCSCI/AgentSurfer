@@ -36,6 +36,10 @@ export interface RunAgentLoopInput {
   abortSignal: AbortSignal;
   abort: () => void;
   emit: (event: RuntimeEvent) => void;
+  /** Optional reasoning effort (low/medium/high) — StepFun step-3.7-flash
+   *  honors this; other providers silently ignore it. Read from
+   *  ModelConfig.reasoningEffort in lib/agent.ts. */
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 export interface RunAgentLoopDeps {
@@ -157,6 +161,16 @@ export async function runAgentLoop(deps: RunAgentLoopDeps): Promise<void> {
     tools: enabledTools as Parameters<typeof streamText>[0]['tools'],
     maxSteps,
     abortSignal,
+    // Pass reasoning_effort through to OpenAI-compatible providers
+    // (StepFun's step-3.7-flash). AI SDK v4's OpenAI provider reads
+    // `providerOptions.openai.reasoningEffort` and serializes it to the
+    // `reasoning_effort` body field (@ai-sdk/openai/dist/index.mjs:465).
+    // Other providers (MiniMax, anthropic) ignore the field. We only
+    // include the namespace when set, so we don't pollute the request
+    // body with empty `openai: {}` objects for non-OpenAI providers.
+    ...(input.reasoningEffort
+      ? { providerOptions: { openai: { reasoningEffort: input.reasoningEffort } } }
+      : {}),
 
     onChunk: ({ chunk }) => {
       const c = chunk as { type: string; [k: string]: unknown };
@@ -404,6 +418,21 @@ export async function runAgentLoop(deps: RunAgentLoopDeps): Promise<void> {
     deps.onRunTerminated?.('errored');
     // Re-throw so the caller (background.ts) sees the failure too.
     throw err;
+  } finally {
+    // Safety net: if onFinish never fired (e.g. provider connection
+    // dropped, AI SDK returned without invoking onFinish), the
+    // assistant message would stay in 'draft' status forever and the
+    // side panel would keep showing "Agent is running…" with the red
+    // pause button — the user has no signal that the run is actually
+    // over. Mark complete only if the mapping still exists (i.e. the
+    // run hasn't already been terminated via markAbandoned / markError
+    // by the onError path above).
+    if (messageStore.hasLiveRun(runId)) {
+      run.warn('consumeStream returned without onFinish — force-completing message');
+      messageStore.markComplete(runId);
+      messageStore.endRun(runId);
+      deps.onRunTerminated?.('completed');
+    }
   }
 
   // 4. Clean up wall-clock timer.

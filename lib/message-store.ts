@@ -227,6 +227,17 @@ export class MessageStore {
     this.notify();
   }
 
+  /**
+   * True if the runId has a live message mapping that hasn't been
+   * terminated yet. Used by runAgentInner's safety-net finally to
+   * detect runs whose onFinish never fired (and therefore still have
+   * a 'draft' message that would leave the side panel showing
+   * "Agent is running…" forever).
+   */
+  hasLiveRun(runId: string): boolean {
+    return this.state.runToMessageId.has(runId);
+  }
+
   // ===== Subscription (port-based) =====
 
   subscribe(sub: Subscriber): void {
@@ -253,12 +264,15 @@ export class MessageStore {
   }
 
   private snapshot(): MessageStoreState {
-    // The side panel only reads `messages` and the runId map (for
-    // routing commands). Return a shallow copy so the side panel can't
-    // mutate the singleton by accident.
+    // IMPORTANT: must return a NEW messages array reference every time,
+    // even if the underlying MessageBuffer objects are mutated in place.
+    // The side panel's useState/setState uses Object.is to decide whether
+    // to re-render; returning the same array reference would skip the
+    // re-render and leave the UI stuck on stale status (e.g. the "Agent
+    // is running…" banner persisting after the run actually ended).
     return {
       currentSessionId: this.state.currentSessionId,
-      messages: this.state.messages,
+      messages: [...this.state.messages],
       lastChunkAt: this.state.lastChunkAt,
       runToMessageId: new Map(this.state.runToMessageId),
     };

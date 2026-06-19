@@ -82,24 +82,53 @@ export class CDPService {
     return this.tabId;
   }
 
-  /** Send a raw CDP command. */
+  /** Send a raw CDP command. Auto-recovers from "Debugger is not attached"
+   *  by reattaching once and retrying. Chrome MV3 occasionally drops the
+   *  debugger session right after `attach()` resolves (especially after
+   *  the tab loses focus or the user changes windows) — the next
+   *  sendCommand fails with "Debugger is not attached to the tab with
+   *  id: N". The user-visible symptom is the agent getting stuck in a
+   *  "debugger not attaching" loop; the fix is to retry the attach+send
+   *  one more time so the agent can keep moving. */
   async send<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
     if (!this.attached || this.tabId == null) {
       throw new Error('CDP not attached — call attach() first');
     }
     const t0 = Date.now();
-    return new Promise((resolve, reject) => {
-      chrome.debugger.sendCommand({ tabId: this.tabId! }, method, params, (result) => {
-        if (chrome.runtime.lastError) {
-          const errMsg = chrome.runtime.lastError.message ?? 'unknown';
-          log.error('cdp', 'send failed', { runId: this.runId, method, error: errMsg, durationMs: Date.now() - t0 });
-          reject(new Error(errMsg));
-        } else {
-          log.debug('cdp', 'send ok', { runId: this.runId, method, durationMs: Date.now() - t0 });
-          resolve(result as T);
-        }
+    const trySend = (): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        chrome.debugger.sendCommand({ tabId: this.tabId! }, method, params, (result) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message ?? 'unknown'));
+          } else {
+            resolve(result as T);
+          }
+        });
       });
-    });
+    try {
+      return await trySend();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Only auto-recover from the specific "not attached" failure.
+      const isDetach = /debugger.*not.*attached|invalid.*tab/i.test(msg);
+      if (!isDetach) {
+        log.error('cdp', 'send failed', { runId: this.runId, method, error: msg, durationMs: Date.now() - t0 });
+        throw err;
+      }
+      log.warn('cdp', 'send saw detach, reattaching', { runId: this.runId, method, error: msg });
+      this.attached = false;
+      // Force a fresh attach on the same tabId.
+      try {
+        await chrome.debugger.attach({ tabId: this.tabId }, '1.3');
+        this.attached = true;
+        log.info('cdp', 'reattach ok', { runId: this.runId, tabId: this.tabId });
+      } catch (reattachErr) {
+        const reMsg = reattachErr instanceof Error ? reattachErr.message : String(reattachErr);
+        log.error('cdp', 'reattach failed', { runId: this.runId, tabId: this.tabId, error: reMsg });
+        throw reattachErr;
+      }
+      return await trySend();
+    }
   }
 
   // ---------- High-level actions ----------
@@ -331,6 +360,122 @@ export class CDPService {
   /** Get the last aim position (for scroll, etc.). */
   get aimX(): number { return this.lastAimPos.x; }
   get aimY(): number { return this.lastAimPos.y; }
+
+  /**
+   * Read the RGBA pixel at CSS-pixel coordinates (x, y) of the current
+   * tab. Returns `{ r, g, b, a }` where each component is 0-255. Used
+   * by cdpAim to verify the LLM's visual aim landed on the expected
+   * color (e.g. "the red button" → pixel should be red-ish).
+   *
+   * Implementation: take a fresh screenshot, decode the pixels, read
+   * one. This is one extra capture per aim, but only ~50ms and the
+   * LLM gets a strong ground-truth signal.
+   */
+  async readPixel(x: number, y: number): Promise<{ r: number; g: number; b: number; a: number }> {
+    const shot = await this.screenshot();
+    const base64 = shot.dataUrl.replace(/^data:image\/png;base64,/, '');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'image/png' });
+    const bitmap = await createImageBitmap(blob);
+    const canvas = new OffscreenCanvas(shot.width, shot.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('cdp.readPixel: OffscreenCanvas 2d context unavailable');
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const ix = Math.max(0, Math.min(shot.width - 1, Math.round(x)));
+    const iy = Math.max(0, Math.min(shot.height - 1, Math.round(y)));
+    const data = ctx.getImageData(ix, iy, 1, 1).data;
+    return { r: data[0]!, g: data[1]!, b: data[2]!, a: data[3]! };
+  }
+
+  /**
+   * Take a screenshot and overlay an N×M grid with cell labels so the
+   * LLM can describe targets in grid coordinates (e.g. "row 8, col 5")
+   * instead of guessing pixel coords. The grid is thin semi-transparent
+   * grey so it doesn't obscure page content; labels are at the top-left
+   * of each cell.
+   *
+   * Default: 10 columns × 8 rows. For a 1280×770 viewport that gives
+   * 128×96 cells — large enough that the LLM's ±60px visual error
+   * reliably falls in the right cell, small enough to give useful
+   * precision.
+   */
+  async screenshotWithGrid(
+    cols: number = 10,
+    rows: number = 8,
+  ): Promise<{ dataUrl: string; width: number; height: number; cols: number; rows: number }> {
+    const shot = await this.screenshot();
+    const base64 = shot.dataUrl.replace(/^data:image\/png;base64,/, '');
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'image/png' });
+    const bitmap = await createImageBitmap(blob);
+    const canvas = new OffscreenCanvas(shot.width, shot.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('cdp.screenshotWithGrid: OffscreenCanvas 2d context unavailable');
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+
+    const W = shot.width, H = shot.height;
+    const cellW = W / cols, cellH = H / rows;
+
+    // Draw grid lines (thin, semi-transparent dark grey for visibility on
+    // both light and dark backgrounds).
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < cols; i++) {
+      const x = Math.round(i * cellW) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    for (let i = 1; i < rows; i++) {
+      const y = Math.round(i * cellH) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+
+    // Cell labels — small dark text on a light pill so it's readable on
+    // any background. Top-left corner of each cell.
+    const fontPx = Math.max(11, Math.min(18, Math.floor(Math.min(cellW, cellH) / 6)));
+    ctx.font = `bold ${fontPx}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.textBaseline = 'top';
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = Math.round(c * cellW) + 4;
+        const y = Math.round(r * cellH) + 4;
+        const label = `r${r}c${c}`;
+        // White pill background for legibility.
+        const metrics = ctx.measureText(label);
+        const padX = 4, padY = 2;
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.fillRect(
+          x - padX,
+          y - padY,
+          metrics.width + padX * 2,
+          fontPx + padY * 2,
+        );
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.95)';
+        ctx.fillText(label, x, y);
+      }
+    }
+
+    const composedBlob = await canvas.convertToBlob({ type: 'image/png' });
+    const composedDataUrl = await blobToDataUrl(composedBlob);
+    return {
+      dataUrl: composedDataUrl,
+      width: W,
+      height: H,
+      cols,
+      rows,
+    };
+  }
 
   // ---------- Visual feedback (CDP Overlay, with LLM-chosen color) ----------
   //

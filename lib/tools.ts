@@ -604,6 +604,11 @@ export const cdpAim = tool({
     // Pass them straight through to highlightQuad (which also uses CSS px).
     await cdp.highlightQuad(x, y, size, color);
     const after = await cdp.screenshot();
+    // Read the actual pixel color at the aim center. The LLM knows what
+    // color the target SHOULD be (e.g. "red button") and can use this
+    // as a strong ground-truth signal without having to visually inspect
+    // the AFTER image pixel-by-pixel.
+    const pixel = await cdp.readPixel(x, y);
     // E2E: when __AGENT_DEBUG__ is set (by the E2E test), dump the
     // AFTER screenshot to the console so a developer watching the test
     // can see where the crosshair actually landed. The test harness
@@ -622,21 +627,27 @@ export const cdpAim = tool({
       aimX: x,
       aimY: y,
       color,
+      pixelColor: pixel,
     };
   },
   experimental_toToolResultContent: (output: {
     dataUrl: string; beforeDataUrl?: string;
     width: number; height: number;
     aimX: number; aimY: number;
+    pixelColor?: { r: number; g: number; b: number; a: number };
   }) => {
     const sw = output.width ?? 0;
     const sh = output.height ?? 0;
     const cx = Math.floor(sw / 2);
     const cy = Math.floor(sh / 2);
+    const pixelInfo = output.pixelColor
+      ? ` Pixel color at aim center: rgb(${output.pixelColor.r}, ${output.pixelColor.g}, ${output.pixelColor.b}).`
+      : '';
     const text = [
       `AIMED at (${output.aimX}, ${output.aimY}).`,
       `Screen center: (${cx}, ${cy}) — calling cdpAim(${cx}, ${cy}) puts the crosshair at the visual middle of the screen.`,
       `If the crosshair is on your target → cdpConfirm(${output.aimX}, ${output.aimY}). If not → cdpCancel + cdpAim with adjusted (x, y).`,
+      `GROUND TRUTH:${pixelInfo} If you aimed at a "red button" and got rgb(255,255,255), you missed white background — try again.`,
     ].join(' ');
     const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
       { type: 'text', text },
@@ -648,6 +659,53 @@ export const cdpAim = tool({
     content.push({ type: 'text', text: `AFTER (crosshair at ${output.aimX}, ${output.aimY}):` });
     content.push({ type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' });
     return content;
+  },
+});
+
+export const cdpGridScreenshot = tool({
+  description:
+    'Take a screenshot of the active tab WITH a numbered grid overlay. Each cell is labeled "r{row}c{col}" (e.g. r0c0, r5c3). Use this when you know approximately WHERE a target is on the screen but cannot guess exact pixel coordinates — describe the target in grid terms (e.g. "the red button is around r7c5") and the tool will translate to pixel coords. Then call cdpAim with those coords. The grid lines are thin and semi-transparent so the underlying page is still visible.',
+  parameters: z.object({
+    cols: z.number().int().min(2).max(20).default(10).describe('Number of columns in the grid (default 10). More columns = finer horizontal precision.'),
+    rows: z.number().int().min(2).max(20).default(8).describe('Number of rows in the grid (default 8). More rows = finer vertical precision.'),
+  }),
+  execute: async ({ cols, rows }) => {
+    const cdp = getCurrentCDP();
+    if (!cdp) throw new Error('CDP not available');
+    const tab = await getActiveTab();
+    if (!tab.url || !tab.url.startsWith('http')) {
+      return { error: `Cannot capture non-http URL (${tab.url || 'empty'}).` };
+    }
+    await cdp.attach(tab.id);
+    const shot = await cdp.screenshotWithGrid(cols, rows);
+    // The cell width/height in pixels — useful so the LLM can convert
+    // grid coords (rN, cM) → pixel coords.
+    const cellW = Math.floor(shot.width / cols);
+    const cellH = Math.floor(shot.height / rows);
+    return {
+      dataUrl: shot.dataUrl,
+      width: shot.width,
+      height: shot.height,
+      cols: shot.cols,
+      rows: shot.rows,
+      cellW,
+      cellH,
+    };
+  },
+  experimental_toToolResultContent: (output: {
+    dataUrl?: string; width?: number; height?: number;
+    cols?: number; rows?: number; cellW?: number; cellH?: number;
+    error?: string;
+  }) => {
+    if (output.error || !output.dataUrl) {
+      return [{ type: 'text', text: output.error ?? 'Screenshot failed' }];
+    }
+    const text = `Grid: ${output.cols} cols × ${output.rows} rows. Each cell is ${output.cellW}×${output.cellH}px. ` +
+      `Describe a target's grid cell (e.g. "r7c5"), then call cdpAim(7*${output.cellH}+${output.cellH}/2, 5*${output.cellW}+${output.cellW}/2, ...).`;
+    return [
+      { type: 'text', text },
+      { type: 'image', data: stripDataUrlPrefix(output.dataUrl), mimeType: 'image/png' },
+    ];
   },
 });
 
@@ -747,6 +805,7 @@ export const allTools = {
   cdpType: safeExecute(cdpType),
   cdpPressKey: safeExecute(cdpPressKey),
   cdpScreenshot: safeExecute(cdpScreenshot),
+  cdpGridScreenshot: safeExecute(cdpGridScreenshot),
   // Focus navigation (Tab key traversal).
   focusNext: safeExecute(focusNext),
   focusPrevious: safeExecute(focusPrevious),

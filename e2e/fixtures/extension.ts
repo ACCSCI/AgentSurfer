@@ -205,9 +205,13 @@ const EXTENSION_PATH = process.env.EXTENSION_PATH
 
 // All non-todo tool names. `todo` is always added by the agent runtime
 // (lib/agent.ts) and cannot be disabled.
+// `cdpClick` was removed on 2026-06-19 — the LLM was abusing it as a
+// "skip visual feedback" shortcut. The only sanctioned click path is
+// cdpAim → cdpConfirm. cdpClick.execute() is still available in
+// lib/tools.ts for internal/E2E use, just not exposed as an LLM tool.
 const ALL_NON_TODO_TOOLS = [
   'cdpAim', 'cdpConfirm', 'cdpScroll', 'cdpCancel',
-  'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
+  'cdpType', 'cdpPressKey', 'cdpScreenshot', 'cdpGridScreenshot',
   'focusNext', 'focusPrevious',
   'smartScreenshot', 'screenshot',
   'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
@@ -234,7 +238,12 @@ export interface ExtensionHandle {
   openSidePanel: () => Promise<{ page: Page; url: string }>;
   openOptions: () => Promise<Page>;
   seedMockConfig: (page: Page) => Promise<void>;
-  seedLiveConfig: (page: Page, provider: 'MiniMax' | 'mimo', apiKey: string) => Promise<void>;
+  seedLiveConfig: (
+    page: Page,
+    provider: 'MiniMax' | 'mimo' | 'stepfun',
+    apiKey: string,
+    options?: { modelId?: string; reasoningEffort?: 'low' | 'medium' | 'high' },
+  ) => Promise<void>;
   cleanup: () => Promise<void>;
   // ---- Live-LLM E2E helpers (used by specs 20/21/22) ----
   clearSWLog: () => void;
@@ -353,17 +362,17 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
     swLog(`[SW:${msg.type()}] ${msg.text()}`);
   });
   sw.on('request', (req) => {
-    if (req.url().includes('anthropic') || req.url().includes('minimaxi') || req.url().includes('xiaomimimo')) {
+    if (req.url().includes('anthropic') || req.url().includes('minimaxi') || req.url().includes('xiaomimimo') || req.url().includes('stepfun')) {
       swLog(`[SW:req] ${req.method()} ${req.url()} ${JSON.stringify(req.postData()?.slice(0, 200))}`);
     }
   });
   sw.on('response', (res) => {
-    if (res.url().includes('anthropic') || res.url().includes('minimaxi') || res.url().includes('xiaomimimo')) {
+    if (res.url().includes('anthropic') || res.url().includes('minimaxi') || res.url().includes('xiaomimimo') || res.url().includes('stepfun')) {
       swLog(`[SW:res] ${res.status()} ${res.url()}`);
     }
   });
   sw.on('requestfailed', (req) => {
-    if (req.url().includes('anthropic') || req.url().includes('minimaxi') || req.url().includes('xiaomimimo')) {
+    if (req.url().includes('anthropic') || req.url().includes('minimaxi') || req.url().includes('xiaomimimo') || req.url().includes('stepfun')) {
       swLog(`[SW:req-failed] ${req.url()} ${req.failure()?.errorText}`);
     }
   });
@@ -452,21 +461,39 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
    * Seed a live LLM config directly via the SW (bypasses the options form
    * so we don't have to type a real API key into the form). Provider-specific
    * defaults come from types/model.ts.
+   *
+   * Optional `options.modelId` overrides the provider's default model
+   * (useful for spec-specific cases like MiniMax's M2 vs M3 or StepFun's
+   * 3.5-flash-2603 vs 3.7-flash). `options.reasoningEffort` is forwarded
+   * to the ModelConfig (only meaningful for StepFun today).
    */
-  async function seedLiveConfig(page: Page, provider: 'MiniMax' | 'mimo', apiKey: string) {
+  async function seedLiveConfig(
+    page: Page,
+    provider: 'MiniMax' | 'mimo' | 'stepfun',
+    apiKey: string,
+    options?: { modelId?: string; reasoningEffort?: 'low' | 'medium' | 'high' },
+  ) {
     const configId = `e2e-${provider}-${Date.now()}`;
     const seedRes = await page.evaluate(
-      async ({ configId, provider, apiKey }) => {
-        const cfg = {
+      async ({ configId, provider, apiKey, options }) => {
+        const modelId =
+          options?.modelId
+          ?? (provider === 'MiniMax'
+            ? 'MiniMax-M3'
+            : provider === 'mimo'
+              ? 'mimo-v2.5-pro'
+              : 'step-3.7-flash');
+        const cfg: Record<string, unknown> = {
           id: configId,
           name: `${provider} (live E2E)`,
           provider,
-          modelId: provider === 'MiniMax' ? 'MiniMax-M3' : 'mimo-v2.5-pro',
+          modelId,
           apiKey,
           baseUrl: null,
           isDefault: true,
           createdAt: Date.now(),
         };
+        if (options?.reasoningEffort) cfg.reasoningEffort = options.reasoningEffort;
         const seed = await new Promise((resolve, reject) => {
           chrome.runtime.sendMessage({ type: '__e2e:seed-config', config: cfg }, (response) => {
             if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
@@ -475,7 +502,7 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
         });
         return seed;
       },
-      { configId, provider, apiKey },
+      { configId, provider, apiKey, options: options ?? null },
     );
     return seedRes;
   }
@@ -637,10 +664,25 @@ export async function launchWithExtension(): Promise<ExtensionHandle> {
     return (await dbMsg(page, { type: '__e2e:list-messages' })) as { messages: unknown[]; count: number };
   }
 
+  /**
+   * Build the side panel's base64-free session export via the SW. Screenshot
+   * blobs are excluded (metadata only). Pass a sessionId or omit to use the
+   * most recently created session.
+   */
+  async function exportSession(
+    page: Page,
+    sessionId?: string,
+  ): Promise<{ export: Record<string, unknown> | null; error?: string }> {
+    return (await dbMsg(page, { type: '__e2e:export-session', sessionId })) as {
+      export: Record<string, unknown> | null;
+      error?: string;
+    };
+  }
+
   return {
     ctx, extId, sw, openSidePanel, openOptions, seedMockConfig, seedLiveConfig, cleanup,
     clearSWLog, dbMsg, resetDb, enableOnlyTools, setReactTextareaValue, captureSnapshots,
     readApiKey, inspectTabs, setWallTimeout, getAssistantTextLength, isAgentRunning, readSWLog,
-    assertLogContains, listAgentSteps, listMessages,
+    assertLogContains, listAgentSteps, listMessages, exportSession,
   };
 }

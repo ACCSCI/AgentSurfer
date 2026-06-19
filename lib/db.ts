@@ -203,9 +203,10 @@ export async function setActiveConfig(id: string): Promise<void> {
 import { ALL_TOOLS, type ToolName } from '@/types';
 
 // Default: CDP tools + smart screenshot + tabs enabled. Others disabled.
+// (cdpClick was removed on 2026-06-19 — see lib/tools.ts comment.)
 const DEFAULT_ENABLED = new Set([
   'cdpAim', 'cdpConfirm', 'cdpScroll', 'cdpCancel',
-  'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
+  'cdpType', 'cdpPressKey', 'cdpScreenshot', 'cdpGridScreenshot',
   'smartScreenshot',
   'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
 ]);

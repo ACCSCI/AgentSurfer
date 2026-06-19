@@ -35,8 +35,8 @@ export function InputBar({
   }
 
   return (
-    <div className="border-t bg-background p-2">
-      <div className="flex items-end gap-2">
+    <div className="shrink-0 border-t bg-background p-2">
+      <div className="flex min-w-0 items-end gap-2">
         <Textarea
           ref={taRef}
           value={value}
@@ -51,7 +51,7 @@ export function InputBar({
             isRunning ? 'Agent is running… (press Esc to cancel)' : 'Ask the agent to do something…'
           }
           rows={2}
-          className="min-h-[44px] min-w-0 flex-1 resize-none"
+          className="min-h-[44px] min-w-0 max-w-full flex-1 resize-none"
           disabled={disabled}
         />
         {isRunning ? (

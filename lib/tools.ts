@@ -488,6 +488,13 @@ Use schedule mode to detect page load completion or animation without paying ima
 
 import { getCurrentCDP } from '@/lib/cdp';
 
+/**
+ * cdpClick is intentionally NOT registered in `allTools` below — it was
+ * being abused as a "skip visual feedback" shortcut by the LLM (no aim →
+ * no crosshair → blind click). The only sanctioned click path is now
+ * cdpAim → cdpConfirm. The function is kept here so internal callers
+ * (e.g. E2E probes) can still use it directly via `cdpClick.execute(...)`.
+ */
 export const cdpClick = tool({
   description:
     'Click at (x, y) using native CDP mouse events. Coordinates are in the same space as the image you see (CSS pixels, since cdpScreenshot now resizes to CSS dimensions).',
@@ -544,7 +551,7 @@ export const cdpPressKey = tool({
 
 export const cdpScreenshot = tool({
   description:
-    'Take a screenshot of the active tab using CDP. The returned image is at CSS pixel dimensions (the same as the rendered page), so the (x, y) you pass to cdpAim / cdpConfirm / cdpClick / cdpDrag / cdpType are in the SAME space as what you see in the image — no conversion needed.',
+    'Take a screenshot of the active tab using CDP. The returned image is at CSS pixel dimensions (the same as the rendered page), so the (x, y) you pass to cdpAim / cdpConfirm / cdpDrag / cdpType are in the SAME space as what you see in the image — no conversion needed.',
   parameters: z.object({}).strict(),
   execute: async () => {
     const cdp = getCurrentCDP();
@@ -577,7 +584,7 @@ export const cdpScreenshot = tool({
 
 export const cdpAim = tool({
   description:
-    'Draw a colored highlight square (crosshair) at (x, y), then return BEFORE/AFTER screenshots so you can see where the box actually landed. If the crosshair is on your target, call cdpConfirm(x, y). If not, call cdpCancel and call cdpAim again with adjusted (x, y). Never call cdpClick directly — always aim first.\n\nCOLOR (same-color aim is nearly invisible — the fill is 50% transparent):\n  - red target    → cyan, yellow, or lime\n  - blue target   → yellow, orange, or red\n  - green target  → magenta, red, or orange\n  - yellow target → blue or purple\n  - white target  → red, blue, or black\n  - black target  → yellow, cyan, or white\nDefaults to red. Accepts CSS names (red/blue/lime/cyan/yellow/magenta/orange/purple/white/black/pink/green) or #rrggbb.',
+    'Draw a colored highlight square (crosshair) at (x, y), then return BEFORE/AFTER screenshots so you can see where the box actually landed. If the crosshair is on your target, call cdpConfirm(x, y). If not, call cdpCancel and call cdpAim again with adjusted (x, y).\n\nCOLOR (same-color aim is nearly invisible — the fill is 50% transparent):\n  - red target    → cyan, yellow, or lime\n  - blue target   → yellow, orange, or red\n  - green target  → magenta, red, or orange\n  - yellow target → blue or purple\n  - white target  → red, blue, or black\n  - black target  → yellow, cyan, or white\nDefaults to red. Accepts CSS names (red/blue/lime/cyan/yellow/magenta/orange/purple/white/black/pink/green) or #rrggbb.',
   parameters: z.object({
     x: z.number().int().min(0).describe('X coordinate'),
     y: z.number().int().min(0).describe('Y coordinate'),
@@ -597,6 +604,16 @@ export const cdpAim = tool({
     // Pass them straight through to highlightQuad (which also uses CSS px).
     await cdp.highlightQuad(x, y, size, color);
     const after = await cdp.screenshot();
+    // E2E: when __AGENT_DEBUG__ is set (by the E2E test), dump the
+    // AFTER screenshot to the console so a developer watching the test
+    // can see where the crosshair actually landed. The test harness
+    // captures SW console output and saves the dataUrl to a PNG file.
+    // SW can't use node:fs so we go through console.log.
+    if ((globalThis as { __AGENT_DEBUG__?: boolean }).__AGENT_DEBUG__) {
+      const step = ((globalThis as { __AGENT_STEP__?: number }).__AGENT_STEP__ ?? 0) + 1;
+      (globalThis as { __AGENT_STEP__?: number }).__AGENT_STEP__ = step;
+      console.log(`[AGENT_DEBUG_AIM_STEP] step=${step} x=${x} y=${y} size=${size} color=${color} dataUrl=${after.dataUrl}`);
+    }
     return {
       dataUrl: after.dataUrl,
       beforeDataUrl: before.dataUrl,
@@ -636,7 +653,7 @@ export const cdpAim = tool({
 
 export const cdpConfirm = tool({
   description:
-    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — never call cdpClick directly. x, y are in the same space as cdpAim coordinates (CSS pixels).',
+    'Confirm the aim position and execute the click. Clears the red crosshair. Use this AFTER cdpAim — it is the ONLY way to click. x, y are in the same space as cdpAim coordinates (CSS pixels).',
   parameters: z.object({
     x: z.number().int().min(0).describe('X coordinate (same units as the image and as cdpAim)'),
     y: z.number().int().min(0).describe('Y coordinate (same units as the image and as cdpAim)'),
@@ -678,7 +695,7 @@ export const cdpDrag = tool({
     const tab = await getActiveTab();
     await cdp.attach(tab.id);
     // Coordinates are already in CSS pixels — same as the cdpScreenshot
-    // image the LLM sees, same as cdpClick / cdpConfirm / highlightQuad.
+    // image the LLM sees, same as cdpConfirm / highlightQuad.
     await cdp.drag(x1, y1, x2, y2);
     return { ok: true, x1, y1, x2, y2 };
   },
@@ -727,7 +744,6 @@ export const allTools = {
   cdpDrag: safeExecute(cdpDrag),
   cdpScroll: safeExecute(cdpScroll),
   cdpCancel: safeExecute(cdpCancel),
-  cdpClick: safeExecute(cdpClick),
   cdpType: safeExecute(cdpType),
   cdpPressKey: safeExecute(cdpPressKey),
   cdpScreenshot: safeExecute(cdpScreenshot),

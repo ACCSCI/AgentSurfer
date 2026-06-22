@@ -39,6 +39,9 @@ chrome-mv3/
 .tmp-probe-*.png
 analyze*.cjs
 
+# Local research papers / notes (not for git)
+research/
+
 # Claude Code local state (worktrees, session data)
 .claude/
 

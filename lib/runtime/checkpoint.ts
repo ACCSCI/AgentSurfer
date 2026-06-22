@@ -56,6 +56,12 @@ export interface RunRecord {
   wallTimeoutMs: number;
   status: RunStatus;
   lastStepNumber: number;
+  /** The draft assistant messageId for this run (from
+   *  MessageStore.beginRun). Persisted so the SW-restart sweep can
+   *  reach into Dexie and mark the orphaned assistant message as
+   *  cancelled — the in-memory runToMessageId map is gone after the
+   *  SW is killed, so this is the only way to repair the message. */
+  messageId?: string;
 }
 
 type InflightStore = Record<string, RunRecord>;
@@ -156,6 +162,24 @@ export async function sweepStaleRuns(): Promise<RunRecord[]> {
   });
   for (const rec of stale) {
     await markRunDone(rec.runId, 'cancelled');
+    // Repair the orphaned assistant message in Dexie. The in-memory
+    // MessageStore.runToMessageId map is gone after the SW restart, so
+    // the persisted messageId is the only handle we have. Without this,
+    // the draft assistant message stays with no stopReason and the
+    // export shows it as silently stalled. Lazy import to avoid a
+    // module-load cycle (data-layer ← db ← ...).
+    if (rec.messageId) {
+      try {
+        const { markMessageAbandoned } = await import('@/lib/data-layer');
+        await markMessageAbandoned(rec.messageId);
+      } catch (err) {
+        log.warn('runtime', '[checkpoint-sweep] failed to repair message', {
+          runId: rec.runId,
+          messageId: rec.messageId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     log.warn('runtime', '[checkpoint-sweep] marked runId=... as abandoned', {
       runId: rec.runId,
       ageMs: now - rec.startMs,

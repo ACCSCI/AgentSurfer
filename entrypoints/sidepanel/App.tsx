@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Loader2, RefreshCw, Settings as SettingsIcon, Square, Wand2 } from 'lucide-react';
+import { Download, Loader2, RefreshCw, Settings as SettingsIcon, Square, Wand2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -15,6 +15,7 @@ import { InputBar } from './components/InputBar';
 import { ModelBadge } from './components/ModelBadge';
 import { Sidebar } from './components/Sidebar';
 import { installSmartScreenshotHandler } from './smart-screenshot';
+import { downloadSessionExport } from './export-session';
 
 // Register the smart-screenshot message listener at module load (must be
 // synchronous per MV3 §2.5 — listeners only fire if registered at top
@@ -95,7 +96,10 @@ export default function App() {
       } else if (t === 'agent_done') {
         currentRunIdRef.current = null;
       } else if (t === 'agent_error') {
-        failRun(String((message as { message?: string }).message ?? 'Agent error'));
+        failRun(
+          String((message as { message?: string }).message ?? 'Agent error'),
+          (message as { reason?: string }).reason,
+        );
         currentRunIdRef.current = null;
       } else if (t === 'tool_result') {
         recordToolResult(message as unknown as ToolResultEvent);
@@ -115,8 +119,24 @@ export default function App() {
     chrome.runtime.openOptionsPage();
   }
 
+  const [exporting, setExporting] = useState(false);
+  async function exportSession() {
+    if (!currentSessionId || exporting) return;
+    setExporting(true);
+    try {
+      await downloadSessionExport(currentSessionId);
+    } catch (err) {
+      console.error('[export] failed', err);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   async function startAgent(prompt: string) {
     if (!currentSessionId) return;
+    // Clear any prior error (e.g. an `abandoned` interruption) so a retry
+    // starts from a clean slate and the interruption notice disappears.
+    useAgentStore.setState({ error: null, errorReason: null });
     try {
       const result = await send(currentSessionId, prompt);
       currentRunIdRef.current = result.runId;
@@ -150,6 +170,19 @@ export default function App() {
                 <Square className="mr-1 h-3 w-3 fill-current" /> Cancel
               </Button>
             )}
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={exportSession}
+              disabled={!currentSessionId || exporting}
+              title="Export conversation (for bug reports)"
+            >
+              {exporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4" />
+              )}
+            </Button>
             <Button
               size="icon"
               variant="ghost"

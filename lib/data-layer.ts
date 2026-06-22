@@ -141,6 +141,31 @@ export async function appendStep(step: Omit<AgentStep, 'id' | 'createdAt'>): Pro
   return row;
 }
 
+/**
+ * Mark an orphaned assistant message as abandoned/cancelled.
+ *
+ * Used by the SW-restart sweep (lib/runtime/checkpoint.ts → sweepStaleRuns):
+ * when the SW is killed mid-run, the loop's onError/onFinish never run, so
+ * the draft assistant message is stuck with `status:'draft'` and no
+ * `stopReason`. The in-memory MessageStore.runToMessageId map is gone, so
+ * the only way to repair the message is to write Dexie directly via the
+ * persisted RunRecord.messageId. This is a no-op if the message already
+ * has a terminal stopReason (i.e. the run actually finished before the SW
+ * died and we just lost the checkpoint cleanup).
+ */
+export async function markMessageAbandoned(messageId: string): Promise<void> {
+  const msg = await db.messages.get(messageId);
+  if (!msg) return;
+  if (msg.stopReason) return; // already terminal — don't clobber
+  await db.messages.update(messageId, {
+    status: 'abandoned',
+    stopReason: 'cancelled' as ChatMessage['stopReason'],
+  });
+  await broadcastChange('messages');
+  log.info('data', 'markMessageAbandoned', { messageId });
+}
+
+
 // ---------- Screenshot writes ----------
 
 export async function saveScreenshot(
@@ -200,7 +225,7 @@ import { ALL_TOOLS } from '@/types';
 
 const DEFAULT_ENABLED = new Set([
   'cdpAim', 'cdpConfirm', 'cdpScroll', 'cdpCancel',
-  'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
+  'cdpType', 'cdpPressKey', 'cdpScreenshot',
   'smartScreenshot',
   'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
 ]);

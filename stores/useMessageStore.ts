@@ -29,40 +29,77 @@ export function useMessageStore(): {
 } {
   const [state, setState] = useState<MessageStoreState>(EMPTY_STATE);
   const portRef = useRef<chrome.runtime.Port | null>(null);
+  // Remember the active session so a reconnect can re-hydrate the
+  // MessageStore in the (possibly freshly-restarted) SW.
+  const currentSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    // Use a closure-captured port to avoid race where onMessage fires
-    // before React re-renders. The ref is for imperative use only.
-    let cancelled = false;
-    const port = chrome.runtime.connect({ name: 'msgstore' });
-    portRef.current = port;
+    // MV3 kills the Service Worker after ~30s idle (and forcibly every
+    // ~5min even with an open port). When that happens Chrome fires
+    // `onDisconnect` on this port. Without a reconnect the side panel
+    // silently goes dead — messages stop flowing and send/cancel hang.
+    // So we wrap connect() in a function and re-run it on disconnect.
+    let disposed = false;
     let updateCount = 0;
     let lastTextLength = 0;
-    port.onMessage.addListener((msg: unknown) => {
-      if (cancelled) return;
-      const m = msg as { type?: string; state?: MessageStoreState };
-      if ((m.type === '__msgstore:snapshot' || m.type === '__msgstore:update') && m.state) {
-        // Shallow replace. MessageBuffers are mutated in-place by the SW,
-        // but React only needs a new messages array reference to re-render.
-        setState(m.state);
-        // Log every update so E2E tests can count them and prove the
-        // MessageStore → port → React pipeline is alive and chunked.
-        // Cheap to compute, easy to grep in .e2e-logs/sw.log.
-        if (typeof window !== 'undefined') {
-          updateCount += 1;
-          const lastMsg = m.state.messages[m.state.messages.length - 1];
-          const tl = lastMsg?.text?.length ?? 0;
-          const rl = lastMsg?.reasoning?.length ?? 0;
-          if (tl !== lastTextLength) {
-            lastTextLength = tl;
-            console.log(`[AgentSurfer][msgstore] update #${updateCount} textLen=${tl} reasoningLen=${rl} status=${lastMsg?.status ?? '?'}`);
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      if (disposed) return;
+      const port = chrome.runtime.connect({ name: 'msgstore' });
+      portRef.current = port;
+
+      port.onMessage.addListener((msg: unknown) => {
+        if (disposed) return;
+        const m = msg as { type?: string; state?: MessageStoreState };
+        if ((m.type === '__msgstore:snapshot' || m.type === '__msgstore:update') && m.state) {
+          // Shallow replace. MessageBuffers are mutated in-place by the SW,
+          // but React only needs a new messages array reference to re-render.
+          setState(m.state);
+          if (m.state.currentSessionId) {
+            currentSessionIdRef.current = m.state.currentSessionId;
+          }
+          // Log every update so E2E tests can count them and prove the
+          // MessageStore → port → React pipeline is alive and chunked.
+          // Cheap to compute, easy to grep in .e2e-logs/sw.log.
+          if (typeof window !== 'undefined') {
+            updateCount += 1;
+            const lastMsg = m.state.messages[m.state.messages.length - 1];
+            const tl = lastMsg?.text?.length ?? 0;
+            const rl = lastMsg?.reasoning?.length ?? 0;
+            if (tl !== lastTextLength) {
+              lastTextLength = tl;
+              console.log(`[AgentSurfer][msgstore] update #${updateCount} textLen=${tl} reasoningLen=${rl} status=${lastMsg?.status ?? '?'}`);
+            }
           }
         }
-      }
-    });
+      });
+
+      // SW idle-timeout / forced-recycle / crash → reconnect after a short
+      // backoff. Re-connecting wakes the SW back up (MV3 re-evaluates the
+      // background script), and re-selecting the session re-hydrates the
+      // MessageStore snapshot so the UI catches up to whatever the agent
+      // did while we were disconnected.
+      port.onDisconnect.addListener(() => {
+        if (disposed) return;
+        portRef.current = null;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => {
+          connect();
+          const sid = currentSessionIdRef.current;
+          if (sid && portRef.current) {
+            portRef.current.postMessage({ type: 'select_session', sessionId: sid });
+          }
+        }, 250);
+      });
+    };
+
+    connect();
+
     return () => {
-      cancelled = true;
-      port.disconnect();
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      portRef.current?.disconnect();
       portRef.current = null;
     };
   }, []);

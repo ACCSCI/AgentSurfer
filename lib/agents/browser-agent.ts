@@ -33,10 +33,10 @@ MULTI-STEP TASKS (e.g., "search X, click N links, summarize, clean up"):
 - Do NOT skip steps. Do NOT add steps the user didn't ask for. Do NOT stop after 1 step if the user asked for N (e.g., "click 3 links" = click exactly 3, not 1).
 - The FINAL step is almost always a written summary (中文/English) — DO NOT finish without writing it.
 - After the summary, also clean up: tabsClose any tabs you opened during the task.
-- Verify each step visually (cdpScreenshot) before marking complete. Don't trust your first aim — compare before/after cdpAim images and iterate.
+- For visual-servoing (cdpAim → cdpConfirm), trust the tool's own signals: if pixelColor doesn't match the target's color, that IS the error — re-aim with adjusted (x,y) or (dx,dy). DO NOT invent "quota", "rate limit", or other fabricated errors; if the tool result has no error key, the call succeeded.
 - If you get stuck on a single step for >3 attempts, use \`todo\` to mark it blocked and move on rather than burning all remaining steps.`);
 
-  if (has('cdpAim') || has('cdpConfirm') || has('cdpClick')) {
+  if (has('cdpAim') || has('cdpConfirm')) {
     sections.push(`CLICKING: MANDATORY aim→verify→confirm flow with VISUAL SERVOING (two-phase):
 
 VISUAL SERVOING — do not try to compute exact coordinates in one shot.
@@ -48,13 +48,31 @@ PHASE 1 — FIX POSITION (size locked, only x/y change):
   - Start with a LARGE size (200px). The box is way bigger than the
     target, so as long as the box COVERS the target, the position
     is close enough.
-  - Call cdpAim(x, y, size=200). Get BEFORE + AFTER screenshots.
+  - First aim: cdpAim(x, y, size=200) with ABSOLUTE coords from the
+    grid (call cdpGridScreenshot, then row*cellH + cellH/2, col*cellW + cellW/2).
+    Use the cellW/cellH reported in the cdpGridScreenshot response —
+    do NOT guess from the viewport height.
+  - Subsequent adjustments in this phase: cdpAim(dx, dy, size=200).
+    This RELATIVE mode shifts from the current aim — dx>0 right,
+    dx<0 left, dy>0 down, dy<0 up. Pass only one axis to move along
+    that axis alone. ALWAYS keep size=200 in phase 1.
+  - USE THE pixelColor SIGNAL — it's your ground truth. Every cdpAim
+    response includes pixelColor: rgb(R, G, B) at the aim center.
+    If the color doesn't match the target (e.g. you aimed at a "red
+    button" and got rgb(255,255,255) = white background), that is
+    the failure signal — call cdpCancel + cdpAim(dx, dy) to nudge
+    toward the target. DO NOT give up, narrate "rate limit" / "quota",
+    or fall back to cdpScreenshot — cdpScreenshot won't move the
+    crosshair. The AFTER image also tells you which direction to nudge
+    (where the target actually is relative to your red box).
   - COMPARE: in the AFTER image, is the target inside the red box?
     - If yes → go to PHASE 2.
     - If no → describe the relative offset ("red box is right of
-      target by ~100px") and call cdpCancel + cdpAim with corrected
-      x/y. KEEP size=200.
+      target by ~100px") and call cdpCancel + cdpAim(dx, dy) with
+      the corrected offset. KEEP size=200.
   - Iterate until the target is centered in the box (3-4 rounds typical).
+  - Read aimX/aimY from EACH cdpAim response — those are the values
+    to pass into cdpConfirm later. They update with each relative move.
 
 PHASE 2 — SHRINK SIZE (position locked, only size changes):
   - Once the box is centered on the target, shrink the size:
@@ -74,12 +92,11 @@ whether the position changed or the size changed).
 CANCELING: cdpCancel() clears the current highlight without acting.
 Always cancel before re-aiming.
 
-COORDINATE SYSTEM: cdpAim / cdpConfirm / cdpClick accept SCREENSHOT
-coordinates — the same units as the BEFORE/AFTER images you see (e.g.,
-device pixels, typically 2x the CSS viewport on HiDPI). Pass the pixel
-coordinates you see directly. The tool converts to CSS internamente using
-the cached dpr — you do NOT need to think about dpr or divide anything.
-The tool result reports the screenshot dimensions for reference.
+COORDINATE SYSTEM: cdpAim / cdpConfirm accept coordinates in the
+same space as the BEFORE/AFTER images you see. cdpScreenshot now resizes
+its PNG to CSS pixel dimensions, so screenshot coords = CSS pixel coords
+= the actual rendered page. No dpr math needed. The tool result reports
+the screenshot dimensions for reference.
 
 DEFAULTS: cdpAim defaults to size=200 (large enough to see). cdpAim
 defaults to color='red'. Pick a contrasting color if needed (lime on
@@ -105,12 +122,13 @@ DOM TOOLS DISABLED: domQuery, domClick, domType, pressKey, focusNext, focusPrevi
   sections.push(`RULES:
 - Never enter passwords/sensitive values without user confirmation.
 - TOOL ERRORS ARE OBSERVATIONS, NOT FAILURES. When a tool returns { error: "..." }, treat it as a new input and decide what to do next: try a different approach, retry with adjusted parameters, or call another tool. Do NOT give up after one error — try at least 2-3 different approaches before concluding the task is impossible.
+- NEVER INVENT ERRORS YOU DIDN'T SEE. If a tool result has no error key and no error text, the call SUCCEEDED — use the result (pixelColor, image, returned data). Fabricating "quota error", "rate limit", "throttle", or "service unavailable" when the tool returned a normal result is a hallucination that will trap you in a retry loop. Read the actual tool result text.
 - Common tool errors and how to recover:
-  * "CDP not available" → call cdpScreenshot first (it re-attaches the debugger) before retrying
+  * "CDP not available" — happens ONLY on the very first CDP call of a run, when the debugger hasn't attached yet. Call cdpScreenshot once to attach; subsequent CDP calls reuse the attached debugger. Do NOT use this as a generic retry pattern after every failed tool call — most "CDP not available" errors are actually caused by the previous tool call's parameters (bad coords, stale aim), not a debugger detach.
   * "No active tab" → call tabsList, then tabsSwitch to a non-chrome:// tab
   * "Tab not found" → call tabsList to refresh tab IDs
   * "javascript: URLs are not allowed" → use domQuery + cdpType via executeScript, or open a new tab with a proper http(s):// URL
-- If a tool fails 3 times with the same approach, try a fundamentally different strategy.
+- If a tool fails 3 times with the same approach, try a fundamentally different strategy. Do NOT just keep re-calling cdpScreenshot — that doesn't change the aim position. Re-aim with adjusted coords.
 - If the page is chrome://, file://, or about:, stop and tell the user.
 - Be concise. Don't narrate steps the user can see in the trace.
 - ACT, don't narrate — every observation must be followed by a tool call or final answer.`);
@@ -139,7 +157,7 @@ export const BrowserAgent: Agent = {
   description: 'General-purpose browser automation agent. Sees the page, clicks, types, scrolls, navigates between tabs, plans multi-step tasks with a todo list.',
   tools: [
     'cdpAim', 'cdpConfirm', 'cdpCancel', 'cdpScroll',
-    'cdpClick', 'cdpType', 'cdpPressKey', 'cdpScreenshot',
+    'cdpType', 'cdpPressKey', 'cdpScreenshot', 'cdpGridScreenshot',
     'smartScreenshot',
     'tabsList', 'tabsSwitch', 'tabsOpen', 'tabsClose',
     'domQuery', 'domClick', 'domType', 'pressKey',

@@ -20,7 +20,7 @@ function mustResolve(refId: string): string {
 export const a11yClick = tool({
   description:
     'Click the element with the given a11y refId. The selector is resolved from the most recent a11yTree() snapshot. If the ref is stale (page changed), this fails — re-tree and try again.',
-  parameters: z.object({
+  inputSchema: z.object({
     refId: z.string().describe('The refId of the element to click (from a11yTree).'),
   }),
   execute: async ({ refId }) => {
@@ -39,7 +39,7 @@ export const a11yClick = tool({
 export const a11yType = tool({
   description:
     'Set the value of an editable element (input/textarea/contenteditable) with the given a11y refId. Uses the native value setter so React/Vue pick up the change, then dispatches `input` + `change` events. Optionally press Enter after.',
-  parameters: z.object({
+  inputSchema: z.object({
     refId: z.string().describe('The refId of the editable element.'),
     text: z.string().describe('The text to type.'),
     pressEnter: z
@@ -95,7 +95,7 @@ export const a11yType = tool({
 export const a11yPressKey = tool({
   description:
     'Press a key on the element with the given a11y refId. The element must be focused first (a11yClick or .focus() via a11yType will focus it).',
-  parameters: z.object({
+  inputSchema: z.object({
     refId: z.string().describe('The refId of the element to focus and send the key to.'),
     key: z
       .enum(['Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete'])

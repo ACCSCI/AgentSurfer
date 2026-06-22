@@ -10,6 +10,8 @@ export function ChatThread() {
   const { state } = useMessageStore();
   const messages = state.messages;
   const error = useAgentStore((s) => s.error);
+  const errorReason = useAgentStore((s) => s.errorReason);
+  const isAbandoned = errorReason === 'abandoned';
 
   // The last assistant message is "live" when its status is 'draft'.
   const lastMsg = messages[messages.length - 1];
@@ -51,10 +53,27 @@ export function ChatThread() {
         </div>
       )}
       {error && (
-        <div className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
-          <div className="font-semibold">Agent error</div>
-          <div className="mt-1 whitespace-pre-wrap break-words">{error}</div>
-        </div>
+        isAbandoned ? (
+          <div
+            data-testid="agent-abandoned"
+            className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400"
+          >
+            <div className="font-semibold">Task interrupted</div>
+            <div className="mt-1 whitespace-pre-wrap break-words">
+              The background service worker restarted while the agent was running, so this run was
+              stopped. This can happen after the browser idles the extension. Just send the request
+              again to retry.
+            </div>
+          </div>
+        ) : (
+          <div
+            data-testid="agent-error"
+            className="rounded border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive"
+          >
+            <div className="font-semibold">Agent error</div>
+            <div className="mt-1 whitespace-pre-wrap break-words">{error}</div>
+          </div>
+        )
       )}
       <div ref={bottomRef} />
     </div>

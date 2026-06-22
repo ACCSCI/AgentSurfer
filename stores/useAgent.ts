@@ -38,6 +38,11 @@ export interface ToolResultEvent {
 interface AgentState {
   currentStep: StepUpdate | null;
   error: string | null;
+  /** Why the run terminated abnormally. 'abandoned' = the SW was
+   *  recycled mid-run and the checkpoint-sweep cleaned it up — this is
+   *  a recoverable interruption, not a real failure. Anything else (or
+   *  null) is treated as a genuine error. */
+  errorReason: string | null;
 
   // Per-event-type state (architecture rule 7).
   todos: TodoItem[];
@@ -56,13 +61,16 @@ interface AgentState {
   setProgress: (p: ProgressUpdate) => void;
   /** todo_update event — replace the todo list. */
   setTodos: (todos: TodoItem[]) => void;
-  /** agent_error event — record a fatal error for display. */
-  fail: (message: string) => void;
+  /** agent_error event — record a fatal error for display. The optional
+   *  `reason` lets the UI distinguish a recoverable `abandoned` from a
+   *  genuine failure. */
+  fail: (message: string, reason?: string) => void;
 }
 
 const initial = {
   currentStep: null,
   error: null,
+  errorReason: null,
   todos: [],
   currentProgress: null,
   totalPromptTokens: 0,
@@ -91,5 +99,5 @@ export const useAgentStore = create<AgentState>((set) => ({
 
   setTodos: (todos) => set({ todos }),
 
-  fail: (message) => set({ error: message }),
+  fail: (message, reason) => set({ error: message, errorReason: reason ?? null }),
 }));

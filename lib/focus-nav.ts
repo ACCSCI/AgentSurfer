@@ -31,7 +31,7 @@ const MAX_TABS = 5;
 export const focusNext = tool({
   description:
     'Press Tab one or more times to move keyboard focus forward in the page. After each Tab, returns the accessible name + role + bbox of the newly focused element. Use this when the a11y tree is too noisy, the element you want is not in the tree, or the DOM is obfuscated (Google, Meta, etc.) so domQuery selectors fail. The page draws a focus ring around the focused element, so a screenshot will show exactly where focus is. ESC cancels a focus trap (modal, iframe).',
-  parameters: z.object({
+  inputSchema: z.object({
     count: z
       .number()
       .int()
@@ -84,7 +84,7 @@ export const focusNext = tool({
 export const focusPrevious = tool({
   description:
     'Press Shift+Tab to move keyboard focus backward. Same return shape as focusNext. Use to "go back" when you overshot, or to exit a focus trap by re-pressing repeatedly.',
-  parameters: z.object({
+  inputSchema: z.object({
     count: z.number().int().min(1).max(MAX_TABS).default(1),
     screenshot: z.boolean().default(false),
   }),

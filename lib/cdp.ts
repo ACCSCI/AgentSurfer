@@ -263,6 +263,9 @@ export class CDPService {
 
   async scroll(deltaX: number, deltaY: number): Promise<void> {
     log.info('cdp', 'scroll', { runId: this.runId, deltaX, deltaY });
+    if (!this.lastAimPos) {
+      throw new Error('cdp.scroll: no previous aim — call cdpAim(x, y) first to set a scroll position');
+    }
     const { x, y } = this.lastAimPos;
     await this.send('Input.dispatchMouseEvent', {
       type: 'mouseWheel',
@@ -355,11 +358,20 @@ export class CDPService {
     return { dataUrl: resizedDataUrl, width: cssWidth, height: cssHeight };
   }
 
-  private lastAimPos: { x: number; y: number } = { x: 0, y: 0 };
+  private lastAimPos: { x: number; y: number } | null = null;
 
   /** Get the last aim position (for scroll, etc.). */
-  get aimX(): number { return this.lastAimPos.x; }
-  get aimY(): number { return this.lastAimPos.y; }
+  get aimX(): number { return this.lastAimPos?.x ?? 0; }
+  get aimY(): number { return this.lastAimPos?.y ?? 0; }
+
+  /**
+   * Get the last aim position. Returns null if no aim has been made
+   * yet. Used by cdpAim's relative mode (dx/dy) to compute the new
+   * aim position from the current one.
+   */
+  getCurrentAim(): { x: number; y: number } | null {
+    return this.lastAimPos;
+  }
 
   /**
    * Read the RGBA pixel at CSS-pixel coordinates (x, y) of the current

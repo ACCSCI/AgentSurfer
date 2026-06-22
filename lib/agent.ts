@@ -58,8 +58,13 @@ import type { ModelConfig } from '@/types';
 // options page.
 const DEFAULT_MAX_STEPS = 99;
 
-/** Configurable wall-clock timeout (overridable for E2E tests). */
-export let WALL_TIMEOUT = 120_000;
+/** Configurable wall-clock timeout (overridable for E2E tests).
+ *  Multi-step tasks (search → click N links → summarize) routinely run
+ *  past 2 minutes; 120s was too aggressive and caused the
+ *  checkpoint-sweep to mark legitimately-running tasks as `abandoned`
+ *  after a SW recycle. 300s (5 min) matches the E2E budgets used for
+ *  real LLM browse tasks (see e2e/specs/22, 36, 41). */
+export let WALL_TIMEOUT = 300_000;
 export function setWallTimeout(ms: number) { WALL_TIMEOUT = ms; }
 
 export interface RunAgentInput {
@@ -83,8 +88,13 @@ export interface RunAgentInput {
 
 /** Fire-and-forget agent loop. All output goes through emit(). */
 export async function runAgent(input: RunAgentInput): Promise<void> {
-  const run = log.scope(input.sessionId);
-  run.info('runAgent start', { sessionId: input.sessionId });
+  // Scope the logger to the RUN id, not the session id. Previously this
+  // used input.sessionId, so every [agent]-scope log line showed the
+  // sessionId in the runId slot — masking the real runId and making the
+  // bing-search silent-hang post-mortem far harder (the true runId only
+  // appeared in [runtime] saveRun logs). Now logs are correlatable by runId.
+  const run = log.scope(input.runId);
+  run.info('runAgent start', { sessionId: input.sessionId, runId: input.runId });
 
   // Wrap emit so every emitted event is also logged (useful for E2E
   // assertions and post-mortem debugging — events leave a trail in
@@ -133,7 +143,7 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService, run: 
 
   // 2. Open a draft message for this run. Subsequent appendChunk calls
   //    find it via runToMessageId.
-  messageStore.beginRun(sessionId, runId);
+  const draftMessageId = messageStore.beginRun(sessionId, runId);
   run.info('run draft message opened', { runId, sessionId, agentName: agent.name });
 
   // 3. Filter tools. The agent declares which tools it knows about
@@ -175,6 +185,7 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService, run: 
     wallTimeoutMs: WALL_TIMEOUT,
     status: 'running',
     lastStepNumber: 0,
+    messageId: draftMessageId,
   };
   await saveRun(runRecord);
   run.info('run checkpoint saved', { runId, agentName: agent.name });
@@ -219,6 +230,21 @@ async function runAgentInner(input: RunAgentInput, cdpService: CDPService, run: 
       abortSignal: input.abortSignal,
       abort: input.abort,
       emit: input.emit,
+      // Pass reasoningEffort through to the loop. Undefined for
+      // configs created before 2026-06-19 (Zod defaults to undefined
+      // when the field is absent). The loop will skip the
+      // `providerOptions` spread in that case — providers that don't
+      // know about it (MiniMax, anthropic) won't be affected.
+      reasoningEffort: config.reasoningEffort,
+      // Pass the provider id so the loop can enable Anthropic-style
+      // `thinking` for MiniMax (which only returns reasoning chunks
+      // when thinking is explicitly enabled).
+      provider: config.provider,
+      // Pass the draft messageId so per-step persistence (appendStep)
+      // can link steps to this message without re-looking it up via
+      // messageIdForRun(runId), which raced to undefined and orphaned
+      // every step with messageId:''.
+      draftMessageId,
     },
     cdpService,
     run,

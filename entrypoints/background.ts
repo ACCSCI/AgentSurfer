@@ -103,6 +103,7 @@ type IncomingMessage =
   | { type: '__e2e:inspect-tabs' }
   | { type: '__e2e:list-agent-steps' }
   | { type: '__e2e:list-messages' }
+  | { type: '__e2e:export-session'; sessionId?: string }
   | { type: '__e2e:highlight-rect'; tabId: number; x: number; y: number; width: number; height: number; color: string; keepMs?: number }
   | { type: '__e2e:cdp-debug'; tabId: number; x: number; y: number; color: string; size: number }
   | { type: '__e2e:coord-mapping'; tabId: number }
@@ -345,6 +346,25 @@ async function handleMessage(
       const allMessages = await db.messages.toArray();
       allMessages.sort((a, b) => a.createdAt - b.createdAt);
       return { messages: allMessages, count: allMessages.length };
+    }
+
+    case '__e2e:export-session': {
+      // E2E-only: build the same base64-free session export the side panel's
+      // "Export" button produces (screenshot blobs are excluded — only
+      // metadata). Lets tests inspect terminationReason / lastAssistantStatus
+      // without driving the download UI. If no sessionId is given, use the
+      // most recently created session.
+      const { sessionId } = message as { sessionId?: string };
+      let targetId = sessionId;
+      if (!targetId) {
+        const sessions = await db.sessions.toArray();
+        sessions.sort((a, b) => b.createdAt - a.createdAt);
+        targetId = sessions[0]?.id;
+      }
+      if (!targetId) return { export: null, error: 'no session found' };
+      const { buildSessionExport } = await import('@/entrypoints/sidepanel/export-session');
+      const data = await buildSessionExport(targetId);
+      return { export: data };
     }
 
     case '__e2e:inspect-tabs': {

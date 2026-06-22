@@ -2,12 +2,27 @@ import { useState } from 'react';
 import { Bot, ChevronDown, ChevronRight, Image, User } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
-import type { MessageBuffer, ToolCallBuffer } from '@/lib/message-store';
+import type { MessageBuffer, MessageSegment, ToolCallBuffer } from '@/lib/message-store';
 import { cn } from '@/lib/utils';
 
 export function MessageBubble({ message }: { message: MessageBuffer }) {
   const isUser = message.role === 'user';
   const isLive = message.status === 'draft';
+
+  // Render the ordered segments so the model's reasoning, answer text and
+  // tool calls appear in the exact chronological order they streamed in.
+  // Fall back to the flat fields for any message that somehow has no
+  // segments (defensive — e.g. very old persisted rows).
+  const segments: MessageSegment[] = message.segments.length > 0
+    ? message.segments
+    : buildFallbackSegments(message);
+
+  // Index of the last text segment, so the streaming cursor only blinks at
+  // the true tail of the answer while the run is live.
+  let lastTextIdx = -1;
+  for (let i = 0; i < segments.length; i++) {
+    if (segments[i].kind === 'text') lastTextIdx = i;
+  }
 
   return (
     <div className={cn('flex gap-2', isUser ? 'flex-row-reverse' : 'flex-row')} data-testid="message-bubble">
@@ -20,45 +35,63 @@ export function MessageBubble({ message }: { message: MessageBuffer }) {
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
       <div className="min-w-0 flex-1 space-y-1">
-        {message.reasoning && (
-          <div
-            data-testid="message-reasoning"
-            data-reasoning-length={message.reasoning.length}
-            className="rounded-lg border border-dashed border-muted-foreground/30 bg-muted/30 px-3 py-2 text-xs italic text-muted-foreground whitespace-pre-wrap break-words"
-          >
-            💭 {message.reasoning}
-          </div>
-        )}
-        {message.text && (
-          <div
-            data-testid="message-text"
-            data-text-length={message.text.length}
-            className={cn(
-              'rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words',
-              isUser
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted text-foreground',
-            )}
-          >
-            {message.text}
-            {isLive && (
-              <span
-                data-testid="streaming-cursor"
-                className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-current align-middle"
-              />
-            )}
-          </div>
-        )}
-        {message.toolCalls.length > 0 && (
-          <div className="space-y-1">
-            {message.toolCalls.map((tc) => (
-              <ToolCallRow key={tc.id} tc={tc} />
-            ))}
-          </div>
-        )}
+        {segments.map((seg, i) => {
+          if (seg.kind === 'reasoning') {
+            return (
+              <div
+                key={i}
+                data-testid="message-reasoning"
+                data-reasoning-length={seg.value.length}
+                className="rounded-lg border border-dashed border-muted-foreground/30 bg-muted/30 px-3 py-2 text-xs italic text-muted-foreground whitespace-pre-wrap break-words"
+              >
+                💭 {seg.value}
+              </div>
+            );
+          }
+          if (seg.kind === 'text') {
+            return (
+              <div
+                key={i}
+                data-testid="message-text"
+                data-text-length={seg.value.length}
+                className={cn(
+                  'rounded-lg px-3 py-2 text-sm whitespace-pre-wrap break-words',
+                  isUser
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted text-foreground',
+                )}
+              >
+                {seg.value}
+                {isLive && i === lastTextIdx && (
+                  <span
+                    data-testid="streaming-cursor"
+                    className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-current align-middle"
+                  />
+                )}
+              </div>
+            );
+          }
+          // tool segment — look the toolCall up by id
+          const tc = message.toolCalls.find((t) => t.id === seg.toolCallId);
+          if (!tc) return null;
+          return <ToolCallRow key={tc.id} tc={tc} />;
+        })}
       </div>
     </div>
   );
+}
+
+/**
+ * Reconstruct an ordered segment list from the flat message fields for the
+ * rare case where `segments` is empty (defensive). Order matches the legacy
+ * fixed layout: reasoning, then text, then tool calls.
+ */
+function buildFallbackSegments(message: MessageBuffer): MessageSegment[] {
+  const segs: MessageSegment[] = [];
+  if (message.reasoning) segs.push({ kind: 'reasoning', value: message.reasoning });
+  if (message.text) segs.push({ kind: 'text', value: message.text });
+  for (const tc of message.toolCalls) segs.push({ kind: 'tool', toolCallId: tc.id });
+  return segs;
 }
 
 function ToolCallRow({ tc }: { tc: ToolCallBuffer }) {

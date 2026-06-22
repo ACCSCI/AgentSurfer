@@ -27,7 +27,7 @@
 //     iteration can use the AI SDK's `generateObject` (Zod) for
 //     structured output.
 
-import { streamText, type LanguageModelV1 } from 'ai';
+import { streamText, type LanguageModel } from 'ai';
 import { log } from '@/lib/logger';
 import { createModel } from '@/lib/llm';
 import type { Agent } from '@/lib/agents';
@@ -81,7 +81,7 @@ export async function invokeVerifier(
     ? agent.verifierPrompt(evidence)
     : agent.verifierPrompt;
 
-  let model: LanguageModelV1;
+  let model: LanguageModel;
   try {
     model = await run.timed('verifier.createModel', () => createModel(modelConfig));
   } catch (err) {

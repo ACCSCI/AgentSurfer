@@ -1,19 +1,113 @@
 // LLM factory — turns a ModelConfig from Dexie into a Vercel AI SDK
-// LanguageModelV1 that streamText / generateText can call.
+// LanguageModelV3 that streamText / generateText can call.
 
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import type { LanguageModelV1 } from 'ai';
+import type { LanguageModel } from 'ai';
 import type { ModelConfig, Provider } from '@/types';
 
-// NOTE: as of writing (Jun 2026), @ai-sdk/openai-compatible@1.0.39 bundles
-// @ai-sdk/provider@2.x (LanguageModelV2) while @ai-sdk/openai and
-// @ai-sdk/anthropic@1.x are still on @ai-sdk/provider@1.x (LanguageModelV1).
-// Runtime is fine — `streamText` accepts both — but the return type
-// doesn't unify. We widen to `any` and add the V1 cast to keep call sites
-// typed. Will go away once we upgrade to `ai@5` + matching provider majors.
-// biome-ignore lint/suspicious/noExplicitAny: V1/V2 return-type mismatch
-type AnyLanguageModel = any;
+/**
+ * Sentinels used to smuggle StepFun reasoning through the OpenAI provider's
+ * `content` channel. The MessageStore (lib/message-store.ts) recognizes these
+ * exact markers, peels them out of the text stream, and routes the enclosed
+ * text to a `reasoning` segment. Keep these in sync with the parser there.
+ */
+export const THINK_OPEN = '<think>';
+export const THINK_CLOSE = '</think>';
+
+/**
+ * Custom `fetch` for the StepFun provider that rewrites the streamed SSE so the
+ * model's reasoning becomes visible. StepFun emits reasoning in the `reasoning`
+ * / `reasoning_content` delta fields, but @ai-sdk/openai@1.3.24 ignores both.
+ * We transform each SSE chunk: any reasoning delta is re-emitted as a `content`
+ * delta wrapped in <think>…</think> sentinels (opened on the first reasoning
+ * delta, closed when normal content starts). Non-streaming responses and
+ * non-StepFun-shaped payloads pass through untouched.
+ */
+export const stepfunReasoningFetch: typeof fetch = async (input, init) => {
+  const res = await fetch(input, init);
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!res.body || !contentType.includes('text/event-stream')) return res;
+
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffered = '';
+  let thinkOpen = false;
+  let thinkClosed = false;
+
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      buffered += decoder.decode(chunk, { stream: true });
+      const lines = buffered.split('\n');
+      buffered = lines.pop() ?? '';
+      for (const line of lines) {
+        controller.enqueue(encoder.encode(`${rewriteSseLine(line)}\n`));
+      }
+    },
+    flush(controller) {
+      if (buffered) controller.enqueue(encoder.encode(rewriteSseLine(buffered)));
+      buffered = '';
+    },
+  });
+
+  // Rewrites one SSE line, folding reasoning deltas into <think>-wrapped
+  // content. Closure captures the thinkOpen/thinkClosed cursor so the sentinel
+  // is opened/closed exactly once across the whole stream.
+  function rewriteSseLine(line: string): string {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return line;
+    const payload = trimmed.slice(5).trim();
+    if (payload === '[DONE]') return line;
+    let json: {
+      choices?: Array<{ delta?: { content?: unknown; reasoning?: unknown; reasoning_content?: unknown } }>;
+    };
+    try {
+      json = JSON.parse(payload);
+    } catch {
+      return line;
+    }
+    const delta = json.choices?.[0]?.delta;
+    if (!delta) return line;
+
+    const reasoningPiece =
+      (typeof delta.reasoning_content === 'string' && delta.reasoning_content) ||
+      (typeof delta.reasoning === 'string' && delta.reasoning) ||
+      '';
+    const contentPiece = typeof delta.content === 'string' ? delta.content : '';
+
+    // Nothing reasoning-related and no need to close the block: pass through.
+    if (!reasoningPiece && (!contentPiece || thinkClosed || !thinkOpen)) return line;
+
+    let merged = '';
+    if (reasoningPiece) {
+      if (!thinkOpen) {
+        merged += THINK_OPEN;
+        thinkOpen = true;
+      }
+      merged += reasoningPiece;
+    }
+    if (contentPiece) {
+      if (thinkOpen && !thinkClosed) {
+        merged += THINK_CLOSE;
+        thinkClosed = true;
+      }
+      merged += contentPiece;
+    }
+
+    // Strip the reasoning fields and replace content with our merged text.
+    delete (delta as { reasoning?: unknown }).reasoning;
+    delete (delta as { reasoning_content?: unknown }).reasoning_content;
+    (delta as { content?: string }).content = merged;
+    return `data: ${JSON.stringify(json)}`;
+  }
+
+  const stream = res.body.pipeThrough(transform);
+  return new Response(stream, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+};
 
 // Known model IDs per provider — used to populate the dropdown in the options
 // page. Users can still type a custom model id in the form.
@@ -37,6 +131,13 @@ export const KnownModels: Record<Provider, readonly string[]> = {
     'MiniMax-M2.1-highspeed',
     'MiniMax-M2',
   ],
+  // step-3.7-flash is the recommended StepFun model — supports all three
+  // reasoning_effort levels (low/medium/high), image input, and tool calls.
+  // step-3.5-flash-2603 only supports low/high (no medium), so we list it
+  // as an alternative for users who want the older behavior. step-router-v1
+  // auto-routes between deepseek-v4-pro and step-3.5-flash but rejects
+  // image content, which breaks the cdpAim/visual-servoing loop.
+  stepfun: ['step-3.7-flash', 'step-3.5-flash-2603'],
   mock: ['mock:happy', 'mock:oneTool', 'mock:textOnly', 'mock:clickSequence', 'mock:failsAtStep3', 'mock:echoHistory'],
 };
 
@@ -44,11 +145,11 @@ export function listModels(provider: Provider): readonly string[] {
   return KnownModels[provider] ?? [];
 }
 
-export async function createModel(config: ModelConfig): Promise<LanguageModelV1> {
-  return (await createModelInternal(config)) as unknown as LanguageModelV1;
+export async function createModel(config: ModelConfig): Promise<LanguageModel> {
+  return createModelInternal(config);
 }
 
-async function createModelInternal(config: ModelConfig): Promise<AnyLanguageModel> {
+async function createModelInternal(config: ModelConfig): Promise<LanguageModel> {
   switch (config.provider) {
     case 'openai': {
       return createOpenAI({ apiKey: config.apiKey })(config.modelId);
@@ -99,6 +200,45 @@ async function createModelInternal(config: ModelConfig): Promise<AnyLanguageMode
       const provider = createAnthropic({
         baseURL: 'https://api.minimaxi.com/anthropic/v1',
         apiKey: config.apiKey,
+      });
+      return provider(config.modelId);
+    }
+
+    case 'stepfun': {
+      // StepFun (阶跃星辰) — OpenAI-compatible Chat Completions API on the
+      // Step Plan channel. We piggyback on @ai-sdk/openai@1.x (v1-protocol)
+      // and override the baseURL. The OpenAI provider constructs the request
+      // URL as `${baseURL}/chat/completions` (matches the Step Plan path).
+      //
+      // Image input: the AI SDK's OpenAI provider maps our
+      // `{type:'image', data, mimeType}` content (with raw base64 in `data`,
+      // see stripDataUrlPrefix in lib/tools.ts:75) to
+      // `{type:'image_url', image_url:{url:'data:<mime>;base64,<data>'}}`,
+      // which is exactly the format StepFun accepts per
+      // https://platform.stepfun.com/docs/llms.txt (Base64编码图片 / 图片理解
+      // examples). Verified shape-compatible on 2026-06-19.
+      //
+      // reasoning_effort: the OpenAI provider's `getArgs` (in
+      // @ai-sdk/openai/dist/index.mjs:465) reads
+      // `providerMetadata.openai.reasoningEffort` and serializes it to
+      // the `reasoning_effort` body field. We pass it via
+      // `providerOptions` in lib/runtime/loop.ts. Other providers ignore
+      // the field — StepFun's `step-3.7-flash` is the only model that
+      // honors it today.
+      const provider = createOpenAI({
+        baseURL: 'https://api.stepfun.com/step_plan/v1',
+        apiKey: config.apiKey,
+        // @ai-sdk/openai@1.3.24 does NOT read any reasoning delta field from
+        // Chat Completions SSE, so StepFun's `reasoning_content` (verified via
+        // scripts/probe-reasoning-chunks.ts 2026-06-19: 1460 chars in BOTH
+        // `reasoning` and `reasoning_content` delta fields, 0 surfaced by the
+        // SDK) is silently dropped. We inject a custom fetch that rewrites the
+        // SSE stream on the fly, folding each reasoning delta into the `content`
+        // field wrapped in <think>…</think> sentinels. The loop's MessageStore
+        // (lib/message-store.ts) splits those sentinels back out into a
+        // `reasoning` segment so the UI shows the model's thinking interleaved
+        // with its answer.
+        fetch: stepfunReasoningFetch,
       });
       return provider(config.modelId);
     }

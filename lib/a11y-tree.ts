@@ -45,7 +45,7 @@ export const a11yTree = tool({
     `Take a structured accessibility tree of the active page and return it as a nested object. Each node has a \`refId\` (e.g. "n42") that you can pass to a11yClick/a11yType/a11yPressKey. The tree only includes elements that are interactive, have accessible meaning, or are landmark structure (forms, headings, nav, main). Refs are valid until the next a11yTree() call — if the page changes, re-tree.
 
 The DEFAULT view is a 2-level shallow dump (head, nav, main, footer). Pass \`maxDepth: 6\` or \`path: ['n12', 'n15']\` to expand specific subtrees.`,
-  parameters: z.object({
+  inputSchema: z.object({
     maxDepth: z
       .number()
       .int()
@@ -87,7 +87,7 @@ The DEFAULT view is a 2-level shallow dump (head, nav, main, footer). Pass \`max
 export const focused = tool({
   description:
     'Return the accessible info of the currently focused element. Cheap — call anytime to know "where am I right now".',
-  parameters: z.object({}).strict(),
+  inputSchema: z.object({}).strict(),
   execute: async () => runOnActiveTab(() => {
     const el = document.activeElement;
     if (!el || el === document.body) return null;

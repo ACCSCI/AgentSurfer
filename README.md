@@ -97,7 +97,7 @@ cp .env.example .env
 |---|---|---|
 | `MINIMAX_API_KEY` | MiniMax 提供商 / MiniMax provider | [platform.minimaxi.com](https://platform.minimaxi.com/user-center/basic-information/keys) |
 | `MIMO_API_KEY` | 小米 MiMo 提供商 / Xiaomi MiMo provider | [platform.xiaomimimo.com](https://platform.xiaomimimo.com/user-center/api-keys) |
-| `STEPFUN_API_KEY` | 阶跃星辰提供商标 / StepFun provider | [platform.stepfun.com](https://platform.stepfun.com/user-center/basic-information/keys) |
+| `STEPFUN_API_KEY` | 阶跃星辰提供商 / StepFun provider | [platform.stepfun.com](https://platform.stepfun.com/user-center/basic-information/keys) |
 
 ---
 

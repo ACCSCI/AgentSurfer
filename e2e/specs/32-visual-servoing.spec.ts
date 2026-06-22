@@ -39,7 +39,8 @@ test('Visual servoing: LLM uses two-phase aim pattern', async () => {
     await bingPage.goto('https://www.bing.com/?setmkt=en-US', { waitUntil: 'domcontentloaded' });
     await new Promise((r) => setTimeout(r, 2000));
 
-    // The prompt enforces the two-phase pattern.
+    // The prompt enforces the two-phase pattern + dx/dy relative mode
+    // for fine adjustments in phase 1.
     const prompt = [
       'Tabs 一下找到 bing 标签，tabsSwitch 到它。',
       'cdpScreenshot 看页面，bing 首页搜索框（白色长条带放大镜）在页面中上部。',
@@ -47,19 +48,25 @@ test('Visual servoing: LLM uses two-phase aim pattern', async () => {
       '现在做两阶段视觉伺服：',
       '',
       '阶段 1（修位置，尺寸固定）：',
-      '  - 用 size=200 调 cdpAim（保持尺寸不变）',
+      '  - **第一步**：调 cdpGridScreenshot 拿网格坐标，转成像素坐标后',
+      '    调 cdpAim(x, y, size=200)（**绝对模式** x/y，**保持 size=200**）',
+      '  - **后续微调**：用 cdpAim(dx, dy)（**相对模式**，不要传 x/y），',
+      '    从上一次 aim 位置偏移。dx>0 右移，dx<0 左移，dy>0 下移，dy<0 上移。',
+      '    只传一个轴也行（另一个轴不变）。**仍然 size=200**。',
       '  - 看 BEFORE/AFTER 截图：红框是不是覆盖了搜索框？',
-      '  - 如果红框偏了，cdpCancel + cdpAim 调 x/y，**仍然 size=200**',
+      '  - 如果红框偏了，cdpCancel + cdpAim(dx, dy) 调偏移方向和大小',
       '  - 重复直到红框完全覆盖搜索框（最多 5 轮）',
+      '  - **重要**：每次 cdpAim 返回里的 aimX/aimY 是当前 aim 位置，',
+      '    传给 cdpConfirm 用这两个值。',
       '',
       '阶段 2（缩尺寸，位置固定）：',
       '  - 阶段 1 收敛后，逐步缩小 size：200 → 100 → 50 → 30',
       '  - **位置不动**，只改 size',
       '  - 验证每个尺寸下搜索框还完全在框内',
       '',
-      '绝对不要同时改 x/y 和 size。VLM 反馈会乱。',
+      '绝对不要同时改 x/y 和 size（或者 dx/dy 和 size）。VLM 反馈会乱。',
       '',
-      '完成后报告最终坐标和总共调了几次 cdpAim。',
+      '完成后报告最终坐标和总共调了几次 cdpAim，以及其中几次用了 dx/dy 相对模式。',
     ].join('\n');
     await ext.setReactTextareaValue(sidePanel, 'textarea', prompt);
     await sidePanel.locator('button[title="Send"]').click();
@@ -86,7 +93,13 @@ test('Visual servoing: LLM uses two-phase aim pattern', async () => {
 
     for (const s of cdpAimSteps) {
       const aim = s.toolCalls.find((t) => t.name === 'cdpAim')!;
-      console.log(`[step ${s.stepNumber}] aim(x=${aim.args.x}, y=${aim.args.y}, size=${aim.args.size}, color=${aim.args.color})`);
+      const hasAbs = typeof aim.args.x === 'number' && typeof aim.args.y === 'number';
+      const hasRel = typeof aim.args.dx === 'number' || typeof aim.args.dy === 'number';
+      const mode = hasAbs ? 'ABS' : hasRel ? 'REL' : '???';
+      const argsStr = hasAbs
+        ? `x=${aim.args.x}, y=${aim.args.y}`
+        : `dx=${aim.args.dx ?? '-'}, dy=${aim.args.dy ?? '-'}`;
+      console.log(`[step ${s.stepNumber}] [${mode}] aim(${argsStr}, size=${aim.args.size}, color=${aim.args.color})`);
       if (s.text) console.log(`  LLM: ${s.text.slice(0, 200)}`);
     }
 
@@ -116,20 +129,37 @@ test('Visual servoing: LLM uses two-phase aim pattern', async () => {
     const sizes = cdpAimSteps.map((s) => Number(s.toolCalls.find((t) => t.name === 'cdpAim')!.args.size));
     const xs = cdpAimSteps.map((s) => Number(s.toolCalls.find((t) => t.name === 'cdpAim')!.args.x));
     const ys = cdpAimSteps.map((s) => Number(s.toolCalls.find((t) => t.name === 'cdpAim')!.args.y));
+    const dxs = cdpAimSteps.map((s) => s.toolCalls.find((t) => t.name === 'cdpAim')!.args.dx);
+    const dys = cdpAimSteps.map((s) => s.toolCalls.find((t) => t.name === 'cdpAim')!.args.dy);
+    const modes = cdpAimSteps.map((s) => {
+      const aim = s.toolCalls.find((t) => t.name === 'cdpAim')!;
+      const hasAbs = typeof aim.args.x === 'number' && typeof aim.args.y === 'number';
+      const hasRel = typeof aim.args.dx === 'number' || typeof aim.args.dy === 'number';
+      return hasAbs ? 'ABS' : hasRel ? 'REL' : '???';
+    });
 
     const sizesChangeDuringPhase1 = sizes.slice(0, -1).some((s, i) => s !== sizes[i + 1]);
     const sizesDecreaseAtEnd = sizes.length >= 2 && sizes[sizes.length - 1] < sizes[0];
     const phase1Count = sizes.findIndex((s, i) => i > 0 && s < sizes[i - 1]);
     const phase1EndsAt = phase1Count === -1 ? sizes.length : phase1Count;
 
+    const absCount = modes.filter((m) => m === 'ABS').length;
+    const relCount = modes.filter((m) => m === 'REL').length;
+
     console.log('\n--- Visual servoing analysis ---');
+    console.log(`modes: [${modes.join(', ')}]`);
     console.log(`sizes: [${sizes.join(', ')}]`);
     console.log(`x:     [${xs.join(', ')}]`);
     console.log(`y:     [${ys.join(', ')}]`);
+    console.log(`dx:    [${dxs.map((d) => d ?? '-').join(', ')}]`);
+    console.log(`dy:    [${dys.map((d) => d ?? '-').join(', ')}]`);
     console.log(`phase 1 ends at aim #${phase1EndsAt} (size started decreasing)`);
     console.log(`phase 2 has ${sizes.length - phase1EndsAt} shrink steps`);
+    console.log(`mode breakdown: ${absCount} absolute, ${relCount} relative`);
 
     expect(cdpAimSteps.length, 'LLM should make multiple cdpAim calls').toBeGreaterThanOrEqual(2);
+    // First aim should be absolute (we don't have a prior aim to be relative to).
+    expect(modes[0], 'first aim should be ABSOLUTE (no prior aim exists)').toBe('ABS');
   } catch (err) {
     traceFail('test', err);
     throw err;

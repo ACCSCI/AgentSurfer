@@ -7,6 +7,9 @@
 //   - agent_done is emitted
 //   - Bing tab and any opened tabs are closed at the end
 
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { expect, test } from '@playwright/test';
 
 import { launchWithExtension } from '../fixtures/extension';
@@ -74,6 +77,21 @@ test('MiniMax live: Bing search LLM, click 3 links, summarize, cleanup', async (
       console.log(`  - t=${Math.round(s.tMs / 1000)}s textLen=${s.textLength} done=${s.isDone} -> ${s.screenshot}`);
     }
 
+    // The snapshot window (180s) is shorter than the agent's wall budget
+    // (240s), so a slow-but-healthy run can still be streaming when the loop
+    // ends. Wait for a terminal event (agent_done/agent_error) before
+    // exporting, otherwise we'd snapshot a legitimately-still-running message
+    // as 'draft'. Cap the extra wait so the whole test stays under its 300s
+    // timeout.
+    {
+      const terminalDeadline = Date.now() + 90_000;
+      while (Date.now() < terminalDeadline) {
+        const l = ext.readSWLog();
+        if (/emit.*agent_(done|error)/.test(l)) break;
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+
     const log = ext.readSWLog();
     const emitChunks = (log.match(/emit.*chunk/g) ?? []).length;
     const emitDone = (log.match(/emit.*agent_done/g) ?? []).length;
@@ -89,6 +107,38 @@ test('MiniMax live: Bing search LLM, click 3 links, summarize, cleanup', async (
     await new Promise((r) => setTimeout(r, 2000));
     const finalTabs = await ext.inspectTabs(sidePanel);
     console.log(`[22-bing] tabs at end: ${finalTabs.count} (${finalTabs.urls.join(', ')})`);
+
+    // Export the session WITHOUT base64 — the export already strips screenshot
+    // blobs (metadata only). Dump it to .e2e-logs so we can read exactly what
+    // the agent did and whether the task completed.
+    const { export: sessionExport, error: exportError } = await ext.exportSession(sidePanel);
+    const outDir = resolve('.e2e-logs');
+    mkdirSync(outDir, { recursive: true });
+    if (sessionExport) {
+      writeFileSync(
+        resolve(outDir, '22-bing-export.json'),
+        JSON.stringify(sessionExport, null, 2),
+        'utf-8',
+      );
+      console.log('\n[22-bing] === export verdict ===');
+      console.log('  terminationReason  =', sessionExport.terminationReason);
+      console.log('  finishReason       =', sessionExport.finishReason);
+      console.log('  lastAssistantStatus=', sessionExport.lastAssistantStatus);
+      console.log('  messageCount       =', sessionExport.messageCount);
+      console.log('  stepCount          =', sessionExport.stepCount);
+      console.log('  export written to  -> .e2e-logs/22-bing-export.json');
+
+      // The orphan-repair fix means the last assistant message ALWAYS carries
+      // a status; a clean run is 'complete'/'error', an orphaned one would be
+      // 'draft'/'streaming' with a null terminationReason.
+      expect(sessionExport.lastAssistantStatus, 'last assistant status must be present').toBeTruthy();
+      expect(
+        ['draft', 'streaming'].includes(String(sessionExport.lastAssistantStatus)),
+        'run must NOT be left orphaned (draft/streaming)',
+      ).toBe(false);
+    } else {
+      console.log('[22-bing] export failed:', exportError);
+    }
 
     // The agent should at least have done the run (even if some tools failed).
     expect(emitDone, 'agent_done should be emitted (run completed within wall timeout)').toBeGreaterThan(0);

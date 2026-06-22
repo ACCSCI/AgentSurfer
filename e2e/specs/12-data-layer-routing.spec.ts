@@ -98,10 +98,10 @@ test.describe('db:* message routing', () => {
       expect(active?.id).toBe(cfgId);
 
       // 7. db:set-tool-enabled
-      await dbMsg(sidePanel, { type: 'db:set-tool-enabled', name: 'cdpClick', enabled: false });
+      await dbMsg(sidePanel, { type: 'db:set-tool-enabled', name: 'cdpPressKey', enabled: false });
       snap = await listAll(sidePanel);
-      const cdpClick = snap.toolConfigs.find((t) => t.name === 'cdpClick');
-      expect(cdpClick?.enabled).toBe(false);
+      const cdpPressKey = snap.toolConfigs.find((t) => t.name === 'cdpPressKey');
+      expect(cdpPressKey?.enabled).toBe(false);
 
       // 8. db:delete-config
       await dbMsg(sidePanel, { type: 'db:delete-config', id: cfgId });

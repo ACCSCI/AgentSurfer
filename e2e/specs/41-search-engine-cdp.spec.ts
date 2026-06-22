@@ -80,9 +80,11 @@ test('CDP-only: agent clicks start → types query → clicks search on a Baidu-
     // dataUrl to .e2e-logs/ as a PNG.
     ext.sw.on('console', async (msg) => {
       const text = msg.text();
-      const match = text.match(/\[AGENT_DEBUG_AIM_STEP\]\s+step=(\d+)\s+x=(\d+)\s+y=(\d+)\s+size=(\d+)\s+color=(\w+)\s+dataUrl=(data:image\/png;base64,[A-Za-z0-9+/=]+)/);
+      // Format: [AGENT_DEBUG_AIM_STEP] step=N mode=absolute|relative x=X y=Y size=S color=C dataUrl=...
+      // mode is optional (added when cdpAim gained dual-mode support) — match either with or without it.
+      const match = text.match(/\[AGENT_DEBUG_AIM_STEP\]\s+step=(\d+)(?:\s+mode=(\w+))?\s+x=(-?\d+)\s+y=(-?\d+)\s+size=(\d+)\s+color=(\w+)\s+dataUrl=(data:image\/png;base64,[A-Za-z0-9+/=]+)/);
       if (!match) return;
-      const [, step, x, y, size, color, dataUrl] = match;
+      const [, step, , x, y, size, color, dataUrl] = match;
       const buf = Buffer.from(
         dataUrl.replace(/^data:image\/png;base64,/, ''),
         'base64',
@@ -132,36 +134,28 @@ test('CDP-only: agent clicks start → types query → clicks search on a Baidu-
     const tabId = tabs.ids[idx];
     console.log(`[fixture] tabId=${tabId}`);
 
-    // 4. Prompt — pure visual description. NO coordinates, NO dpr, NO coordinate
-    //    system explanation. Trust the agent to find targets visually. The
-    //    cdpAim tool itself reports the screen-center coordinates in every
-    //    response so the agent always has an anchor to aim at.
+    // 4. Prompt — direct, terse. step-3.7-flash loses focus on long
+    //    prompts. Two things matter: (a) USE the cellW/cellH from the
+    //    cdpGridScreenshot response (not guessed viewport height), and
+    //    (b) USE the pixelColor signal — red button → red-ish RGB;
+    //    white background → rgb(255,255,255) means you missed, re-aim
+    //    with (dx, dy), do NOT call cdpScreenshot.
     const prompt = [
-      `Switch to the search-engine fixture tab (id ${tabId}) using tabsList → tabsSwitch.`,
+      `Switch to tab ${tabId} via tabsList → tabsSwitch.`,
       ``,
-      `Drive the page using ONLY cdpScreenshot / cdpAim / cdpConfirm / cdpCancel / cdpType / cdpPressKey (dom tools are DISABLED — using them will fail).`,
+      `Tools available (DOM tools DISABLED): cdpScreenshot, cdpGridScreenshot, cdpAim, cdpConfirm, cdpCancel, cdpType, cdpPressKey.`,
       ``,
-      `The only way to click anything is the aim→confirm flow: cdpAim(x, y) → look at the BEFORE/AFTER screenshots it returns → if the crosshair is on your target, call cdpConfirm(x, y) with the SAME coords. If not, call cdpCancel and re-aim with corrected coords.`,
+      `The page is a search-engine homepage (Baidu/Bing style). Click these 3 things in order:`,
+      `  1. RED "开始" pill button at bottom-center (only red element on page).`,
+      `  2. WHITE search input "请输入搜索内容…" in middle of page. After clicking, cdpType("你好aBc") into it.`,
+      `  3. BLUE "搜一下" button right of the input.`,
+      `Top-right reads "state: initial" → "started" (after #1) → "typed" (after #2) → "searched" (after #3). Stop when it reads "searched".`,
       ``,
-      `The page looks like a search engine homepage (similar to Baidu / Bing / Google). Three elements to click, in order:`,
+      `Per element: cdpGridScreenshot → convert cell coords to pixels using the cellW/cellH the tool REPORTS (not guessed viewport height) → cdpAim(x, y, size=200) with contrasting color → cdpConfirm(aimX, aimY).`,
       ``,
-      `  ELEMENT A — a big RED pill-shaped button labeled "开始" at the BOTTOM-CENTER of the page. Only red element on the page.`,
-      `  ELEMENT B — a white rounded search input box in the MIDDLE of the page (left half of the search row). Contains placeholder text "请输入搜索内容…".`,
-      `  ELEMENT C — a BLUE rounded button labeled "搜一下" immediately to the RIGHT of the search input. Only blue button on the page.`,
+      `CRITICAL: each cdpAim response includes pixelColor: rgb(R, G, B) at the aim center. This is your ground truth. Red button → expect reddish (e.g. rgb(225,6,2)). If you got white (rgb(255,255,255)), you missed — call cdpCancel + cdpAim(dx, dy) to nudge from the current aim. NEVER claim "quota error" or "rate limit" — those aren't real, the tool succeeded. NEVER call cdpScreenshot as a "retry" — it doesn't move the crosshair.`,
       ``,
-      `Elements B and C start GREYED OUT. They only become clickable after you click A first.`,
-      ``,
-      `Top-right status indicator tracks state: starts as "state: initial", advances to "started" when A is clicked, "typed" after text is entered, "searched" after C is clicked.`,
-      ``,
-      `Procedure:`,
-      `  1. cdpGridScreenshot to see the page with a numbered grid overlay (r0c0 to r7c9). The grid makes pixel-coordinate guessing much more reliable.`,
-      `  2. Read the GRID CELL of Element A (red "开始" at bottom-center, e.g. around r7c5) and convert to pixels: y = row*cellH + cellH/2, x = col*cellW + cellW/2. Then cdpAim with size=200, color contrasting (e.g. cyan for red target). The cdpAim response includes pixelColor — the RGB at the aim center. If it doesn't match the target's color (red button → expect reddish), cdpCancel + re-aim with a different cell.`,
-      `  3. Once cyan box covers the red button, cdpConfirm. Read the "pixelColor" in cdpAim's response: red button should be reddish (e.g. rgb(225,6,2)), white background would be rgb(255,255,255). If pixelColor doesn't match the target color, re-aim.`,
-      `  4. cdpAim at Element B (white search input in middle, e.g. r4c4 or r4c5). Same grid→pixel conversion. cdpConfirm.`,
-      `  5. cdpType("你好aBc") into the focused input.`,
-      `  6. cdpAim at Element C (blue "搜一下" right of the input, e.g. r4c6 or r4c7). Same grid→pixel. cdpConfirm. If the blue button keeps missing, cdpPressKey("Enter") as fallback — the input listens for Enter too.`,
-      ``,
-      `Stop as soon as the top-right status reads "state: searched" with q="你好aBc". Reply with one short sentence confirming success.`,
+      `Reply with one short sentence when state="searched".`,
     ].join('\n');
 
     await ext.setReactTextareaValue(sidePanel, 'textarea', prompt);
